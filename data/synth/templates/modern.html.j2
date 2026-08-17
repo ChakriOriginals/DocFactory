@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: Letter; margin: 0 0 16mm 0; }
+  body { font-family: Avenir, "Helvetica Neue", Arial, sans-serif;
+         font-size: 9.5pt; color: #17222b; }
+  .banner { background: #0f766e; color: #fff; padding: 12mm 14mm 9mm 14mm; }
+  .banner table { width: 100%; border-collapse: collapse; }
+  .banner td { vertical-align: middle; }
+  .doc-kind { font-size: 9pt; letter-spacing: 3px; opacity: 0.85; }
+  .vendor { text-align: right; }
+  .vendor .name { font-size: 15pt; font-weight: 600; }
+  .vendor .addr { font-size: 8.5pt; opacity: 0.85; line-height: 1.4; margin-top: 3px; }
+  .logo-dot { display: inline-block; width: 30px; height: 30px; border-radius: 15px;
+              background: #fff; color: #0f766e; text-align: center; line-height: 30px;
+              font-weight: bold; font-size: 14pt; margin-left: 8px; }
+  .content { padding: 0 14mm; }
+  .chips { width: 100%; border-collapse: separate; border-spacing: 6px 0;
+           margin: 8mm -6px 0 -6px; }
+  .chip { background: #f0f5f4; border-radius: 6px; padding: 8px 12px; width: 33%; }
+  .chip .k { font-size: 7.5pt; color: #56716c; letter-spacing: 1px; }
+  .chip .v { font-size: 10.5pt; font-weight: 600; margin-top: 2px; }
+  .billed { margin-top: 7mm; }
+  .billed .k { font-size: 7.5pt; color: #56716c; letter-spacing: 1px; }
+  .billed .name { font-weight: 600; margin-top: 2px; }
+  .billed .addr { color: #56716c; font-size: 8.5pt; line-height: 1.4; }
+  .items { width: 100%; border-collapse: collapse; margin-top: 7mm; }
+  .items th { text-align: left; font-size: 8pt; color: #56716c; letter-spacing: 1px;
+              padding: 5px 8px; border-bottom: 2px solid #0f766e; }
+  .items td { padding: 5px 8px; }
+  .items tr.alt td { background: #f0f5f4; }
+  .num { text-align: right; }
+  .totals-card { margin-top: 6mm; margin-left: auto; width: 62mm; background: #f0f5f4;
+                 border-radius: 8px; padding: 5mm; }
+  .totals { width: 100%; border-collapse: collapse; }
+  .totals td { padding: 2.5px 0; }
+  .totals .label { color: #56716c; }
+  .totals .num { font-weight: 500; }
+  .totals .grand td { font-size: 12pt; font-weight: 700; color: #0f766e;
+                      border-top: 1.5px solid #0f766e; padding-top: 5px; }
+  .footer { margin: 10mm 0 0 0; font-size: 8pt; color: #56716c; }
+</style>
+</head>
+<body>
+  <div class="banner">
+    <table>
+      <tr>
+        <td><div class="doc-kind">TAX INVOICE</div></td>
+        <td class="vendor">
+          <span class="name">{{ inv.vendor.name }}</span><span class="logo-dot">{{ inv.vendor.name[0] }}</span>
+          <div class="addr">
+            {{ inv.vendor.address_lines | join(" · ") }}{% if inv.vendor.email %} · {{ inv.vendor.email }}{% endif %}
+          </div>
+        </td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="content">
+    <table class="chips">
+      <tr>
+        <td class="chip"><div class="k">INVOICE NUMBER</div><div class="v">{{ inv.invoice_number }}</div></td>
+        <td class="chip"><div class="k">ISSUED</div><div class="v">{{ inv.invoice_date | date_long }}</div></td>
+        <td class="chip"><div class="k">DUE</div><div class="v">{{ inv.due_date | date_long }}</div></td>
+      </tr>
+    </table>
+
+    <div class="billed">
+      <div class="k">BILLED TO</div>
+      <div class="name">{{ inv.bill_to.name }}</div>
+      <div class="addr">{{ inv.bill_to.address_lines | join(", ") }}</div>
+    </div>
+
+    <table class="items">
+      <tr>
+        <th class="num" style="width:8%">QTY</th>
+        <th style="width:57%">ITEM</th>
+        <th class="num" style="width:17%">RATE</th>
+        <th class="num" style="width:18%">LINE TOTAL</th>
+      </tr>
+      {% for item in inv.line_items %}
+      <tr{% if loop.index is even %} class="alt"{% endif %}>
+        <td class="num">{{ item.quantity }}</td>
+        <td>{{ item.description }}</td>
+        <td class="num">{{ item.unit_price | usd }}</td>
+        <td class="num">{{ item.amount | usd }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+
+    <div class="totals-card">
+      <table class="totals">
+        <tr><td class="label">Subtotal</td><td class="num">{{ inv.subtotal | usd }}</td></tr>
+        <tr><td class="label">Tax {{ inv.tax_rate | pct }}</td><td class="num">{{ inv.tax | usd }}</td></tr>
+        <tr class="grand"><td class="label">Amount Due</td><td class="num">{{ inv.total | usd }}</td></tr>
+      </table>
+    </div>
+
+    <div class="footer">{{ inv.payment_note }}</div>
+  </div>
+</body>
+</html>

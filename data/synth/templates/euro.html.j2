@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 20mm 18mm; }
+  body { font-family: Georgia, "Times New Roman", serif; font-size: 10pt;
+         color: #222; }
+  .head { text-align: center; border-bottom: 3px double #7a1f2b; padding-bottom: 5mm; }
+  .head .name { font-size: 16pt; font-weight: bold; color: #7a1f2b;
+                font-variant: small-caps; letter-spacing: 1px; }
+  .head .addr { font-size: 8.5pt; color: #555; margin-top: 2px; }
+  .head .vat { font-size: 8.5pt; color: #555; }
+  .doc-line { text-align: center; font-size: 14pt; font-weight: bold;
+              letter-spacing: 4px; margin-top: 8mm; }
+  .parties { width: 100%; border-collapse: collapse; margin-top: 8mm; }
+  .parties td { vertical-align: top; font-size: 9.5pt; }
+  .parties .k { font-size: 8pt; color: #777; }
+  .parties .name { font-weight: bold; }
+  .meta { border-collapse: collapse; margin-left: auto; }
+  .meta td { padding: 1.5px 0 1.5px 14px; font-size: 9.5pt; text-align: right; }
+  .meta .k { color: #777; }
+  .items { width: 100%; border-collapse: collapse; margin-top: 8mm;
+           font-size: 9.5pt; }
+  .items th { border-top: 1.5px solid #222; border-bottom: 1.5px solid #222;
+              padding: 5px 6px; text-align: left; font-size: 8.5pt; }
+  .items td { padding: 5px 6px; border-bottom: 0.5px solid #bbb; }
+  .num { text-align: right; }
+  .totals { border-collapse: collapse; margin-left: auto; margin-top: 5mm; }
+  .totals td { padding: 2.5px 0 2.5px 20px; text-align: right; font-size: 10pt; }
+  .totals .k { color: #555; }
+  .totals .grand td { font-weight: bold; font-size: 11.5pt;
+                      border-top: 1.5px solid #222; padding-top: 5px; }
+  .footer { margin-top: 14mm; padding-top: 3mm; border-top: 0.5px solid #bbb;
+            font-size: 8.5pt; color: #555; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div class="name">{{ inv.vendor.name }}</div>
+    <div class="addr">{{ inv.vendor.address_lines | join(" · ") }}</div>
+    <div class="vat">USt-IdNr.: {{ inv.vendor.vat_id }}{% if inv.vendor.email %} · {{ inv.vendor.email }}{% endif %}</div>
+  </div>
+
+  <div class="doc-line">RECHNUNG</div>
+
+  <table class="parties">
+    <tr>
+      <td style="width:55%">
+        <div class="k">Rechnungsempfänger</div>
+        <div class="name">{{ inv.bill_to.name }}</div>
+        {% for line in inv.bill_to.address_lines %}{{ line }}<br>{% endfor %}
+        {% if inv.bill_to.vat_id %}USt-IdNr.: {{ inv.bill_to.vat_id }}{% endif %}
+      </td>
+      <td>
+        <table class="meta">
+          <tr><td class="k">Rechnungsnummer:</td><td><b>{{ inv.invoice_number }}</b></td></tr>
+          <tr><td class="k">Rechnungsdatum:</td><td>{{ inv.invoice_date | date_eu }}</td></tr>
+          <tr><td class="k">Fällig am:</td><td>{{ inv.due_date | date_eu }}</td></tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <table class="items">
+    <tr>
+      <th style="width:6%">Pos.</th>
+      <th style="width:52%">Beschreibung</th>
+      <th class="num" style="width:10%">Menge</th>
+      <th class="num" style="width:16%">Einzelpreis</th>
+      <th class="num" style="width:16%">Betrag</th>
+    </tr>
+    {% for item in inv.line_items %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ item.description }}</td>
+      <td class="num">{{ item.quantity }}</td>
+      <td class="num">{{ item.unit_price | eur }}</td>
+      <td class="num">{{ item.amount | eur }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <table class="totals">
+    <tr><td class="k">Zwischensumme (netto)</td><td>{{ inv.subtotal | eur }}</td></tr>
+    <tr><td class="k">MwSt. {{ inv.tax_rate | pct }}</td><td>{{ inv.tax | eur }}</td></tr>
+    <tr class="grand"><td class="k">Gesamtbetrag</td><td>{{ inv.total | eur }}</td></tr>
+  </table>
+
+  <div class="footer">
+    Zahlbar innerhalb von {{ (inv.due_date - inv.invoice_date).days }} Tagen ohne Abzug. ·
+    {{ inv.payment_note }}
+  </div>
+</body>
+</html>

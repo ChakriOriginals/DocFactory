@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: Letter; margin: 18mm 16mm; }
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+         font-size: 10pt; color: #1c2733; }
+  .header { width: 100%; border-collapse: collapse; }
+  .header td { vertical-align: top; }
+  .logo-box { width: 46px; height: 46px; background: #1f3a5f; color: #fff;
+              font-size: 19pt; font-weight: bold; text-align: center;
+              line-height: 46px; border-radius: 4px; }
+  .vendor-name { font-size: 13pt; font-weight: bold; margin-top: 6px; }
+  .muted { color: #5b6b7c; font-size: 9pt; line-height: 1.45; }
+  .doc-title { font-size: 24pt; font-weight: bold; color: #1f3a5f;
+               text-align: right; letter-spacing: 2px; }
+  .meta { margin-top: 8px; margin-left: auto; border-collapse: collapse; }
+  .meta td { padding: 2px 0 2px 18px; font-size: 9.5pt; }
+  .meta .label { color: #5b6b7c; text-align: right; }
+  .meta .value { font-weight: bold; text-align: right; }
+  .billto { margin-top: 10mm; }
+  .billto .label { font-size: 8pt; font-weight: bold; color: #5b6b7c;
+                   letter-spacing: 1px; }
+  .billto .name { font-weight: bold; margin-top: 2px; }
+  .items { width: 100%; border-collapse: collapse; margin-top: 8mm; }
+  .items th { background: #1f3a5f; color: #fff; text-align: left;
+              padding: 6px 8px; font-size: 8.5pt; letter-spacing: 0.5px; }
+  .items td { padding: 6px 8px; border-bottom: 1px solid #d8dee6; }
+  .num { text-align: right; }
+  .totals { margin-top: 6mm; margin-left: auto; border-collapse: collapse; }
+  .totals td { padding: 3px 0 3px 24px; text-align: right; }
+  .totals .label { color: #5b6b7c; }
+  .totals .grand td { font-size: 12pt; font-weight: bold; color: #1f3a5f;
+                      border-top: 2px solid #1f3a5f; padding-top: 6px; }
+  .footer { margin-top: 12mm; font-size: 8.5pt; color: #5b6b7c;
+            border-top: 1px solid #d8dee6; padding-top: 4mm; }
+</style>
+</head>
+<body>
+  <table class="header">
+    <tr>
+      <td>
+        <div class="logo-box">{{ inv.vendor.name[0] }}</div>
+        <div class="vendor-name">{{ inv.vendor.name }}</div>
+        <div class="muted">
+          {% for line in inv.vendor.address_lines %}{{ line }}<br>{% endfor %}
+          {% if inv.vendor.email %}{{ inv.vendor.email }}{% endif %}
+        </div>
+      </td>
+      <td>
+        <div class="doc-title">INVOICE</div>
+        <table class="meta">
+          <tr><td class="label">Invoice No.</td><td class="value">{{ inv.invoice_number }}</td></tr>
+          <tr><td class="label">Invoice Date</td><td class="value">{{ inv.invoice_date | date_us }}</td></tr>
+          <tr><td class="label">Due Date</td><td class="value">{{ inv.due_date | date_us }}</td></tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <div class="billto">
+    <div class="label">BILL TO</div>
+    <div class="name">{{ inv.bill_to.name }}</div>
+    <div class="muted">
+      {% for line in inv.bill_to.address_lines %}{{ line }}<br>{% endfor %}
+    </div>
+  </div>
+
+  <table class="items">
+    <tr>
+      <th style="width:55%">DESCRIPTION</th>
+      <th class="num" style="width:10%">QTY</th>
+      <th class="num" style="width:17%">UNIT PRICE</th>
+      <th class="num" style="width:18%">AMOUNT</th>
+    </tr>
+    {% for item in inv.line_items %}
+    <tr>
+      <td>{{ item.description }}</td>
+      <td class="num">{{ item.quantity }}</td>
+      <td class="num">{{ item.unit_price | usd }}</td>
+      <td class="num">{{ item.amount | usd }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <table class="totals">
+    <tr><td class="label">Subtotal</td><td>{{ inv.subtotal | usd }}</td></tr>
+    <tr><td class="label">Sales Tax ({{ inv.tax_rate | pct }})</td><td>{{ inv.tax | usd }}</td></tr>
+    <tr class="grand"><td class="label">Total Due</td><td>{{ inv.total | usd }}</td></tr>
+  </table>
+
+  <div class="footer">{{ inv.payment_note }}</div>
+</body>
+</html>
