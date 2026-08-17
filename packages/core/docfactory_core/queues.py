@@ -42,34 +42,46 @@ class QueueBroker:
         return self._urls[name]
 
     def ensure_queues(self) -> None:
+        # Visibility timeout must exceed worst-case processing time or a slow
+        # message gets redelivered mid-flight: parse is fast (10s); extract
+        # can include a real LLM call plus one retry (90s).
+        visibility = {self._settings.parse_queue: "10", self._settings.extract_queue: "90"}
         for logical in (self._settings.parse_queue, self._settings.extract_queue):
-            dlq_url = self._sqs.create_queue(QueueName=dlq_name(logical))["QueueUrl"]
-            dlq_arn = self._sqs.get_queue_attributes(QueueUrl=dlq_url, AttributeNames=["QueueArn"])[
-                "Attributes"
-            ]["QueueArn"]
-            redrive_policy = json.dumps(
-                {
-                    "deadLetterTargetArn": dlq_arn,
-                    "maxReceiveCount": str(self._settings.max_receive_count),
-                }
+            dlq_url = self.ensure_queue_pair(
+                logical,
+                visibility_timeout=visibility[logical],
+                max_receive_count=self._settings.max_receive_count,
             )
-            try:
-                url = self._sqs.create_queue(
-                    QueueName=logical, Attributes={"RedrivePolicy": redrive_policy}
-                )["QueueUrl"]
-            except ClientError as exc:
-                code = exc.response.get("Error", {}).get("Code", "")
-                # Queue exists with different attributes (e.g. policy changed):
-                # converge instead of failing, so ensure stays idempotent.
-                if code not in {"QueueAlreadyExists", "QueueNameExists"}:
-                    raise
-                url = self.queue_url(logical)
-                self._sqs.set_queue_attributes(
-                    QueueUrl=url, Attributes={"RedrivePolicy": redrive_policy}
-                )
-            self._urls[logical] = url
-            self._urls[dlq_name(logical)] = dlq_url
             log.info("queue ready", extra={"queue": logical, "dlq": dlq_name(logical)})
+
+    def ensure_queue_pair(
+        self, logical: str, *, visibility_timeout: str, max_receive_count: int
+    ) -> str:
+        """Create (or converge) a queue + its DLQ with redrive. Returns DLQ url."""
+        dlq_url = self._sqs.create_queue(QueueName=dlq_name(logical))["QueueUrl"]
+        dlq_arn = self._sqs.get_queue_attributes(QueueUrl=dlq_url, AttributeNames=["QueueArn"])[
+            "Attributes"
+        ]["QueueArn"]
+        attributes = {
+            "RedrivePolicy": json.dumps(
+                {"deadLetterTargetArn": dlq_arn, "maxReceiveCount": str(max_receive_count)}
+            ),
+            "VisibilityTimeout": visibility_timeout,
+            "ReceiveMessageWaitTimeSeconds": "10",
+        }
+        try:
+            url = self._sqs.create_queue(QueueName=logical, Attributes=attributes)["QueueUrl"]
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in {"QueueAlreadyExists", "QueueNameExists"}:
+                raise
+            url = self.queue_url(logical)
+        # Converge attributes unconditionally: an existing queue with stale
+        # attributes is silently accepted by create_queue on some backends.
+        self._sqs.set_queue_attributes(QueueUrl=url, Attributes=attributes)
+        self._urls[logical] = url
+        self._urls[dlq_name(logical)] = dlq_url
+        return dlq_url
 
     def send(self, queue: str, payload: dict) -> str:
         response = self._sqs.send_message(
