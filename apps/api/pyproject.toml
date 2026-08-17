@@ -1,0 +1,18 @@
+[project]
+name = "docfactory-api"
+version = "0.1.0"
+description = "FastAPI service: document upload + status endpoints"
+requires-python = ">=3.12"
+dependencies = [
+    "docfactory-core",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "python-multipart>=0.0.12",
+]
+
+[tool.uv.sources]
+docfactory-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

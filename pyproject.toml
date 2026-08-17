@@ -1,0 +1,43 @@
+[project]
+name = "docfactory"
+version = "0.1.0"
+description = "Multi-tenant document intelligence platform (workspace root)"
+requires-python = ">=3.12"
+
+# The root is a virtual package: it exists to anchor the workspace, lockfile,
+# and tool config. All real code lives in workspace members.
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["apps/api", "apps/worker", "packages/core", "packages/evals"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+# The synthetic-data generator is dev tooling, not a shippable service,
+# so its heavyweight deps (WeasyPrint et al.) live in a group, not a package.
+synth = [
+    "jinja2>=3.1",
+    "faker>=30",
+    "weasyprint>=62",
+    "pypdfium2>=4.30",
+    "pillow>=10.4",
+    "numpy>=2",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "integration: requires the docker compose stack to be running",
+]

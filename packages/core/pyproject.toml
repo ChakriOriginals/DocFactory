@@ -1,0 +1,14 @@
+[project]
+name = "docfactory-core"
+version = "0.1.0"
+description = "Shared library: config, logging, storage/queue clients, db models, schemas, llm client"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "boto3>=1.35",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

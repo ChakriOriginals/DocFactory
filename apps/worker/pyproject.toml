@@ -1,0 +1,15 @@
+[project]
+name = "docfactory-worker"
+version = "0.1.0"
+description = "Queue consumers: parse and extract stages"
+requires-python = ">=3.12"
+dependencies = [
+    "docfactory-core",
+]
+
+[tool.uv.sources]
+docfactory-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

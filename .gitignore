@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local config — never commit real endpoints or keys
+.env
+
+# Generated corpus (500 PDFs + labels; reproducible via `make seed`)
+data/synth/out/
+
+# macOS
+.DS_Store
