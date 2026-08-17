@@ -25,6 +25,12 @@ reset: .env
 seed: .env
 	DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python data/synth/generate.py --count 500 --upload --previews
 
+api: .env
+	uv run uvicorn docfactory_api.main:app --port 8000
+
+worker: .env
+	uv run python -m docfactory_worker.main
+
 test:
 	uv run pytest
 

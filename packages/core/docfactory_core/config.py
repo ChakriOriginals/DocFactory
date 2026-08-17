@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     # (needs_ocr). A real one-page invoice yields several hundred.
     min_parse_chars: int = 100
 
+    max_upload_mb: int = 25
+
     phoenix_collector_endpoint: str = "http://localhost:6006"
 
     default_tenant_id: str = "dev-tenant"
