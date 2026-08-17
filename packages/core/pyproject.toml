@@ -7,6 +7,9 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "boto3>=1.35",
+    "sqlalchemy>=2.0.52",
+    "alembic>=1.19.1",
+    "psycopg[binary]>=3.3.4",
 ]
 
 [build-system]

@@ -39,5 +39,5 @@ fmt:
 eval:
 	@echo "make eval is wired in Phase 1.5 (packages/evals)"; exit 1
 
-migrate:
-	@echo "make migrate is wired in Phase 1.1 (first Alembic migration)"; exit 1
+migrate: .env
+	uv run alembic upgrade head
