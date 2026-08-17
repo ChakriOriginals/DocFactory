@@ -117,8 +117,11 @@ class Extraction(ColumnsMixin, Base):
     # Per-rule deterministic validation results, e.g. {"totals_add_up": true}.
     validation: Mapped[dict | None] = mapped_column(JSONB)
     validation_passed: Mapped[bool | None] = mapped_column(Boolean)
-    # Not populated this session; Phase 2 confidence work fills these.
     doc_confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    # Raw scorer inputs (rule outcomes, residual magnitudes, shape flags).
+    # Persisted so confidence weights can be refit offline against the golden
+    # set without reprocessing documents — see confidence.py.
+    confidence_signals: Mapped[dict | None] = mapped_column(JSONB)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
     completion_tokens: Mapped[int | None] = mapped_column(Integer)
     cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 6))

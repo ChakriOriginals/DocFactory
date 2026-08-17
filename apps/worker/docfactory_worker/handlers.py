@@ -21,6 +21,7 @@ import logging
 import uuid
 from datetime import UTC, datetime
 
+from docfactory_core.confidence import ConfidenceReport, failed_extraction_report, score_extraction
 from docfactory_core.config import get_settings
 from docfactory_core.db import session_scope
 from docfactory_core.extraction import ExtractionOutcome, run_extraction
@@ -138,7 +139,14 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
             # Semantic failure after the schema retry: store the raw attempt
             # for debugging, mark failed, acknowledge (an identical re-run
             # would fail the same way — this is not a transport error).
-            _store_extraction(document_id, tenant_id, outcome, invoice=None, validation=None)
+            _store_extraction(
+                document_id,
+                tenant_id,
+                outcome,
+                invoice=None,
+                validation=None,
+                confidence=failed_extraction_report(outcome.error),
+            )
             _record_failure(document_id, f"extraction invalid: {outcome.error}", final=True)
             span.set_attribute("outcome", "invalid_extraction")
             return
@@ -149,15 +157,29 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
             for rule, passed in validation.items():
                 validate_span.set_attribute(f"validation.{rule}", passed)
 
-        _store_extraction(document_id, tenant_id, outcome, outcome.invoice, validation)
+        with tracer.start_as_current_span("extraction.score") as score_span:
+            score_span.set_attribute("openinference.span.kind", "CHAIN")
+            confidence = score_extraction(outcome.invoice, validation, attempts=outcome.attempts)
+            score_span.set_attribute("confidence.doc", confidence.doc_confidence)
+            score_span.set_attribute("confidence.reasons", list(confidence.reasons))
+            # The weakest fields are what a reviewer would open first.
+            for name, entry in sorted(confidence.fields.items(), key=lambda kv: kv[1].confidence)[
+                :3
+            ]:
+                score_span.set_attribute(f"confidence.field.{name}", entry.confidence)
+
+        _store_extraction(document_id, tenant_id, outcome, outcome.invoice, validation, confidence)
         span.set_attribute("outcome", "extracted")
         span.set_attribute("validation.passed", all(validation.values()))
+        span.set_attribute("confidence.doc", confidence.doc_confidence)
         log.info(
             "extracted",
             extra={
                 "model": outcome.model,
                 "attempts": outcome.attempts,
                 "validation_passed": all(validation.values()),
+                "doc_confidence": confidence.doc_confidence,
+                "confidence_reasons": list(confidence.reasons),
             },
         )
 
@@ -168,6 +190,7 @@ def _store_extraction(
     outcome: ExtractionOutcome,
     invoice: Invoice | None,
     validation: dict[str, bool] | None,
+    confidence: ConfidenceReport,
 ) -> None:
     with session_scope() as session:
         extraction = Extraction(
@@ -179,6 +202,8 @@ def _store_extraction(
             else {"raw": outcome.raw_output, "error": outcome.error},
             validation=validation,
             validation_passed=all(validation.values()) if validation else False,
+            doc_confidence=confidence.doc_confidence,
+            confidence_signals=confidence.signals,
             prompt_tokens=outcome.input_tokens,
             completion_tokens=outcome.output_tokens,
             latency_ms=outcome.latency_ms,
@@ -189,7 +214,11 @@ def _store_extraction(
             for name, value in _flatten_fields(invoice).items():
                 session.add(
                     ExtractionField(
-                        extraction_id=extraction.id, tenant_id=tenant_id, name=name, value=value
+                        extraction_id=extraction.id,
+                        tenant_id=tenant_id,
+                        name=name,
+                        value=value,
+                        confidence=confidence.field_confidence(name),
                     )
                 )
             document = session.get(Document, document_id, with_for_update=True)

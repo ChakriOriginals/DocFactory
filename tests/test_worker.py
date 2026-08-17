@@ -179,3 +179,36 @@ def test_poison_pdf_lands_in_dlq_and_worker_survives(stack):
     finally:
         sqs.delete_queue(QueueUrl=broker.queue_url(queue))
         sqs.delete_queue(QueueUrl=broker.queue_url(dlq_name(queue)))
+
+
+def test_confidence_is_persisted_end_to_end(stack):
+    """A clean digital invoice carries a score, signals, and per-field values."""
+    from docfactory_worker.handlers import handle_extract, handle_parse
+
+    store, _ = stack
+    document = _ingest(store, "digital_classic.pdf")
+    payload = {"document_id": str(document.id)}
+    handle_parse(payload)
+    handle_extract(payload)
+
+    with session_scope() as session:
+        extraction = session.scalars(
+            select(Extraction)
+            .where(Extraction.document_id == document.id)
+            .order_by(Extraction.created_at.desc())
+        ).first()
+        assert extraction is not None
+        # mock mode extracts this cleanly, so it should score at the top
+        assert float(extraction.doc_confidence) == 1.0
+        signals = extraction.confidence_signals
+        assert signals["attempts"] == 1
+        assert signals["rule.subtotal_plus_tax_equals_total"] is True
+        # residual magnitudes are stored, not just the booleans
+        assert "residual.subtotal_plus_tax_vs_total" in signals
+        assert signals["vendor.looks_fragmented"] is False
+
+        scored = {f.name: f.confidence for f in extraction.fields}
+        assert scored["vendor"] is not None
+        # every stored field carries a score, line-item cells included
+        assert all(value is not None for value in scored.values())
+        assert float(scored["line_items.0.amount"]) == float(scored["line_items.count"])

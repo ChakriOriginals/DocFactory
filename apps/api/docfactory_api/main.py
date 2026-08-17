@@ -62,6 +62,10 @@ class ExtractionView(BaseModel):
     output: dict
     validation: dict | None
     validation_passed: bool | None
+    # Uncalibrated (see core.confidence): usable for ranking, not as a
+    # probability, and deliberately not compared against any threshold yet.
+    doc_confidence: float | None
+    field_confidence: dict[str, float]
     created_at: datetime
 
 
@@ -180,6 +184,16 @@ def get_document(document_id: uuid.UUID) -> DocumentView:
                 output=latest.output,
                 validation=latest.validation,
                 validation_passed=latest.validation_passed,
+                doc_confidence=float(latest.doc_confidence)
+                if latest.doc_confidence is not None
+                else None,
+                # Scalar fields only: the per-row line-item cells all inherit
+                # one score, so listing them would be noise.
+                field_confidence={
+                    f.name: float(f.confidence)
+                    for f in latest.fields
+                    if f.confidence is not None and not f.name.startswith("line_items.")
+                },
                 created_at=latest.created_at,
             )
             if latest
