@@ -35,6 +35,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# Alembic revisions are generated then hand-edited; their inline SQL strings
+# (e.g. a CHECK constraint listing every status) don't wrap meaningfully.
+"alembic/versions/*.py" = ["E501"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

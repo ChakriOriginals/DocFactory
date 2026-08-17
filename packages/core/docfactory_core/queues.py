@@ -47,7 +47,7 @@ class QueueBroker:
         # can include a real LLM call plus one retry (90s).
         visibility = {self._settings.parse_queue: "10", self._settings.extract_queue: "90"}
         for logical in (self._settings.parse_queue, self._settings.extract_queue):
-            dlq_url = self.ensure_queue_pair(
+            self.ensure_queue_pair(
                 logical,
                 visibility_timeout=visibility[logical],
                 max_receive_count=self._settings.max_receive_count,

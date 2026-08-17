@@ -16,8 +16,9 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 _CURRENCY_TOKENS = ("USD", "EUR", "GBP", "$", "€", "£")
-# regular, no-break, narrow no-break, thin spaces
-_WHITESPACE = re.compile(r"[\s   ]+")
+# Escapes, not literals: PDF text carries no-break, narrow no-break,
+# and thin spaces that are invisible in an editor.
+_WHITESPACE = re.compile("[\\s\\u00a0\\u202f\\u2009]+")
 _US_GROUPED = re.compile(r"[+-]?\d{1,3}(,\d{3})+")
 
 _DATE_FORMATS = (
@@ -57,10 +58,8 @@ def normalize_amount(value: str | int | float | Decimal) -> Decimal:
         else:
             s = s.replace(",", "")  # US: 1,234.56
     elif has_comma:
-        if _US_GROUPED.fullmatch(s):
-            s = s.replace(",", "")  # US thousands only: 1,234
-        else:
-            s = s.replace(",", ".")  # EU decimal comma: 768,70
+        # US thousands only (1,234) vs EU decimal comma (768,70)
+        s = s.replace(",", "") if _US_GROUPED.fullmatch(s) else s.replace(",", ".")
     try:
         return Decimal(s)
     except InvalidOperation as exc:

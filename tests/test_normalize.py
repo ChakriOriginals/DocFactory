@@ -23,7 +23,7 @@ from docfactory_core.normalize import (
         ("1.984,90 €", "1984.90"),
         ("768,70 €", "768.70"),
         ("46,04 €", "46.04"),
-        ("11,51 €", "11.51"),  # no-break space before symbol
+        ("11,51\u00a0€", "11.51"),  # no-break space before symbol
         ("12.839,82", "12839.82"),
     ],
 )
@@ -112,4 +112,4 @@ def test_date_rejects_garbage():
 
 
 def test_text_collapses_whitespace():
-    assert normalize_text("  Bohnbach   Ullrich Stiftung ") == "Bohnbach Ullrich Stiftung"
+    assert normalize_text("  Bohnbach \u00a0 Ullrich Stiftung ") == "Bohnbach Ullrich Stiftung"

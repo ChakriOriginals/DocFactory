@@ -34,14 +34,10 @@ from docfactory_core.normalize import (
     normalize_text,
 )
 from docfactory_core.parsing import extract_pdf_text
-from docfactory_core.schemas import Invoice
+from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
 
 LAYOUTS = ("classic", "modern", "euro")
-SCALAR_FIELDS = (
-    "vendor", "invoice_number", "invoice_date", "due_date", "currency",
-    "subtotal", "tax_rate", "tax", "total",
-)  # fmt: skip
-ALL_FIELDS = (*SCALAR_FIELDS, "line_items")
+ALL_FIELDS = (*SCALAR_FIELD_NAMES, "line_items")
 
 
 @dataclass

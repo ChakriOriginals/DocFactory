@@ -68,13 +68,19 @@ def test_object_store_roundtrip():
 
 
 def test_queue_send_receive_roundtrip():
-    settings = get_settings()
+    # A throwaway queue, not the pipeline's: probing a real queue races any
+    # running worker, which would consume the probe and fail this test.
     broker = QueueBroker()
-    sent = {"probe": str(uuid.uuid4())}
-    broker.send(settings.parse_queue, sent)
-    url = broker.queue_url(settings.parse_queue)
-    received = broker._sqs.receive_message(QueueUrl=url, WaitTimeSeconds=2)
-    messages = received.get("Messages", [])
-    assert messages, "sent message was not received"
-    assert json.loads(messages[0]["Body"]) == sent
-    broker._sqs.delete_message(QueueUrl=url, ReceiptHandle=messages[0]["ReceiptHandle"])
+    queue = f"docfactory-test-probe-{uuid.uuid4().hex[:8]}"
+    broker.ensure_queue_pair(queue, visibility_timeout="30", max_receive_count=3)
+    url = broker.queue_url(queue)
+    try:
+        sent = {"probe": str(uuid.uuid4())}
+        broker.send(queue, sent)
+        messages = broker._sqs.receive_message(QueueUrl=url, WaitTimeSeconds=2).get("Messages", [])
+        assert messages, "sent message was not received"
+        assert json.loads(messages[0]["Body"]) == sent
+        broker._sqs.delete_message(QueueUrl=url, ReceiptHandle=messages[0]["ReceiptHandle"])
+    finally:
+        broker._sqs.delete_queue(QueueUrl=url)
+        broker._sqs.delete_queue(QueueUrl=broker.queue_url(dlq_name(queue)))

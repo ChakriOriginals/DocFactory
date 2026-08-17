@@ -28,7 +28,7 @@ from docfactory_core.llm import get_llm_client
 from docfactory_core.models import Document, DocumentStatus, Extraction, ExtractionField
 from docfactory_core.parsing import extract_pdf_text
 from docfactory_core.queues import QueueBroker
-from docfactory_core.schemas import Invoice
+from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
 from docfactory_core.storage import ObjectStore
 from docfactory_core.tracing import extract_trace_context, inject_trace_context
 from docfactory_core.validation import validate_invoice
@@ -199,20 +199,7 @@ def _store_extraction(
 
 def _flatten_fields(invoice: Invoice) -> dict[str, str]:
     dumped = invoice.model_dump(mode="json")
-    fields = {
-        key: str(dumped[key])
-        for key in (
-            "vendor",
-            "invoice_number",
-            "invoice_date",
-            "due_date",
-            "currency",
-            "subtotal",
-            "tax_rate",
-            "tax",
-            "total",
-        )  # fmt: skip
-    }
+    fields = {key: str(dumped[key]) for key in SCALAR_FIELD_NAMES}
     fields["line_items.count"] = str(len(dumped["line_items"]))
     for index, item in enumerate(dumped["line_items"]):
         for key, value in item.items():

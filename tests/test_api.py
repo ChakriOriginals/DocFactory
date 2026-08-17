@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import pytest
 from docfactory_core.config import get_settings
 from docfactory_core.db import session_scope
-from docfactory_core.models import Document
+from docfactory_core.models import Document, DocumentStatus
 from sqlalchemy import delete, select
 
 pytestmark = pytest.mark.integration
@@ -74,13 +74,16 @@ def test_upload_is_idempotent(client, unique_pdf_bytes):
         rows = session.scalars(
             select(Document).where(Document.id == uuid.UUID(body["document_id"]))
         ).all()
-        assert len(rows) == 1
-        created.append(rows[0].sha256)
+    assert len(rows) == 1
+    created.append(rows[0].sha256)
 
     status = client.get(f"/documents/{body['document_id']}")
     assert status.status_code == 200
-    assert status.json()["status"] == "received"
-    assert status.json()["extraction"] is None
+    # Not pinned to "received": if a worker happens to be running it will have
+    # advanced the document already. The claim under test is idempotency (one
+    # row, same id), not a snapshot of pipeline progress.
+    assert status.json()["status"] in {s.value for s in DocumentStatus}
+    assert status.json()["sha256"] == rows[0].sha256
 
 
 def test_upload_rejects_non_pdf(client):

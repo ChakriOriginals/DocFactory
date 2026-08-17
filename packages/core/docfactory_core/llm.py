@@ -87,7 +87,7 @@ class AnthropicLLMClient:
 # --- mock backend ---------------------------------------------------------
 
 _US_MONEY = re.compile(r"\$\s?[\d,]+\.\d{2}")
-_EU_MONEY = re.compile(r"[\d.]*\d+,\d{2}[\s  ]*€")
+_EU_MONEY = re.compile("[\\d.]*\\d+,\\d{2}[\\s\\u00a0\\u202f]*\u20ac")
 _DATES = re.compile(r"\d{2}/\d{2}/\d{4}|\d{2}\.\d{2}\.\d{4}|[A-Z][a-z]{2,8} \d{1,2}, \d{4}")
 _INVOICE_NO = re.compile(r"INV-\d{4}-\d{5}|RE-\d{4}/\d{4}|\b\d{6}-\d{4}\b")
 _RATE = re.compile(r"([\d.,]+)\s*%")

@@ -53,26 +53,32 @@ class Invoice(BaseModel):
         return str(value)
 
 
+# The canonical scalar field names, in report order. Shared by the worker's
+# extraction_fields flattening and the eval harness so the two never drift.
+SCALAR_FIELD_NAMES = (
+    "vendor",
+    "invoice_number",
+    "invoice_date",
+    "due_date",
+    "currency",
+    "subtotal",
+    "tax_rate",
+    "tax",
+    "total",
+)
+
 _MONEY_SCHEMA = {
     "type": "string",
-    "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\"",
+    "description": (
+        "Plain decimal string: '.' as decimal separator, no thousands "
+        'separators, no currency symbols. e.g. "25832.09"'
+    ),
 }
 
 INVOICE_JSON_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": [
-        "vendor",
-        "invoice_number",
-        "invoice_date",
-        "due_date",
-        "currency",
-        "subtotal",
-        "tax_rate",
-        "tax",
-        "total",
-        "line_items",
-    ],  # fmt: skip
+    "required": [*SCALAR_FIELD_NAMES, "line_items"],
     "properties": {
         "vendor": {"type": "string", "description": "The issuing company's name as printed"},
         "invoice_number": {"type": "string", "description": "Exactly as printed on the document"},
