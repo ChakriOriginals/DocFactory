@@ -10,6 +10,10 @@ dependencies = [
     "sqlalchemy>=2.0.52",
     "alembic>=1.19.1",
     "psycopg[binary]>=3.3.4",
+    "anthropic>=0.122.0",
+    "pdfplumber>=0.11.10",
+    "opentelemetry-sdk>=1.44.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.44.0",
 ]
 
 [build-system]

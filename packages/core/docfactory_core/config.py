@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     # LLM: mock is the default everywhere; anthropic only by explicit choice.
     model_provider: Literal["mock", "anthropic"] = "mock"
     anthropic_api_key: str = ""
+    anthropic_model: str = "claude-opus-5"
+    # "low" effort: bulk structured extraction doesn't need deep reasoning,
+    # and low effort on current models is strong at a fraction of the tokens.
+    llm_effort: str = "low"
+    # Hard cap on thinking + response tokens per call.
+    llm_max_tokens: int = 8192
+
+    # Below this many extracted characters a PDF is treated as image-only
+    # (needs_ocr). A real one-page invoice yields several hundred.
+    min_parse_chars: int = 100
 
     phoenix_collector_endpoint: str = "http://localhost:6006"
 
