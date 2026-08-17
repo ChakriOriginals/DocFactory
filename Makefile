@@ -42,8 +42,10 @@ fmt:
 	uv run ruff check --fix .
 	uv run ruff format .
 
-eval:
-	@echo "make eval is wired in Phase 1.5 (packages/evals)"; exit 1
+## Field-accuracy eval on the golden set. Uses MODEL_PROVIDER from .env
+## (mock by default). For a real number: MODEL_PROVIDER=anthropic make eval
+eval: .env
+	uv run python -m docfactory_evals.run
 
 migrate: .env
 	uv run alembic upgrade head
