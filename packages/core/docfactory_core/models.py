@@ -224,6 +224,9 @@ class Extraction(ColumnsMixin, Base):
     # weights that approved it.
     routing_decision: Mapped[str | None] = mapped_column(String(32))
     confidence_model_version: Mapped[int | None] = mapped_column(Integer)
+    # Whether those weights were ever fitted on THIS document type: the
+    # pipeline slug when they were, "borrowed:<slug>" when they were not.
+    confidence_calibration: Mapped[str | None] = mapped_column(Text)
     # Which pipeline definition produced this, mirroring the model-version
     # discipline: an extraction can always be explained by its config.
     pipeline_slug: Mapped[str | None] = mapped_column(Text)

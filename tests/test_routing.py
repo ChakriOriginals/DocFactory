@@ -13,6 +13,7 @@ measured against one feature space and applied to another.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from docfactory_core.confidence_model import (
@@ -175,3 +176,74 @@ class TestRoutingRule:
         result = route_extraction(CLEAN_SIGNALS, self._model(tmp_path))
         assert isinstance(result, RoutingDecision)
         assert set(result.field_confidence) >= {"vendor", "total", "invoice_date"}
+
+
+class TestPerPipelineCalibration:
+    """A borrowed model is legitimate; a borrowed model served silently is not.
+
+    The features are kind-driven, so an invoice-fitted model produces
+    meaningful vectors for a purchase order — but the *weights* were measured
+    against invoice errors, and nothing about a PO's error distribution has
+    been observed. Routing therefore records which of the two it did.
+    """
+
+    def test_the_invoice_pipeline_serves_its_own_model(self):
+        from docfactory_core.confidence_model import confidence_model_for
+        from docfactory_core.pipeline_registry import default_pipeline
+
+        definition = default_pipeline()
+        model = confidence_model_for(definition)
+        assert definition.confidence_model_path == "config/confidence_model_v2.json"
+        assert model.calibrated_for == "invoice"
+        assert model.calibration_for(definition.slug) == "invoice"
+
+    def test_the_purchase_order_pipeline_is_told_it_is_borrowing(self):
+        from docfactory_core.confidence_model import confidence_model_for
+        from docfactory_core.pipeline_registry import load_from_file
+
+        definition = load_from_file("purchase_order")
+        assert definition.confidence_model_path is None  # falls back to the default
+        model = confidence_model_for(definition)
+        assert model.calibration_for(definition.slug) == "borrowed:invoice"
+
+    def test_the_decision_carries_the_calibration_it_was_made_under(self):
+        from docfactory_core.confidence_model import (
+            confidence_model_for,
+            get_confidence_model,
+            route_extraction,
+        )
+        from docfactory_core.pipeline_registry import default_pipeline, load_from_file
+
+        invoice, po = default_pipeline(), load_from_file("purchase_order")
+        assert route_extraction(CLEAN_SIGNALS, get_confidence_model(), invoice).calibration == (
+            "invoice"
+        )
+        assert (
+            route_extraction(CLEAN_SIGNALS, confidence_model_for(po), po).calibration
+            == "borrowed:invoice"
+        )
+
+    def test_a_named_model_file_is_loaded_rather_than_the_settings_default(self, tmp_path):
+        import json
+
+        from docfactory_core.confidence_model import get_confidence_model
+        from docfactory_core.pipeline import parse_definition
+        from docfactory_core.pipeline_registry import CONFIG_DIR
+
+        payload = json.loads(Path("config/confidence_model_v2.json").read_text())
+        payload["operating_point"]["threshold"] = 0.1234
+        payload["calibrated_for"] = {"pipeline_slug": "purchase_order", "pipeline_version": 1}
+        other = tmp_path / "confidence_model_test.json"
+        other.write_text(json.dumps(payload))
+
+        config = json.loads((CONFIG_DIR / "purchase_order_v1.json").read_text())
+        config["confidence"] = {"model_path": str(other)}
+        definition = parse_definition("dev-tenant", "purchase_order", 1, config)
+
+        from docfactory_core.confidence_model import confidence_model_for
+
+        model = confidence_model_for(definition)
+        assert model.threshold == 0.1234
+        assert model.calibration_for("purchase_order") == "purchase_order"
+        # the deployment default is untouched
+        assert get_confidence_model().threshold == 0.675

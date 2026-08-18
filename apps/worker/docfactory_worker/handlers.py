@@ -26,7 +26,7 @@ from docfactory_core.budget import call_cost_usd, check_budget
 from docfactory_core.confidence import ConfidenceReport, failed_extraction_report, score_extraction
 from docfactory_core.confidence_model import (
     RoutingDecision,
-    get_confidence_model,
+    confidence_model_for,
     route_extraction,
 )
 from docfactory_core.config import get_settings
@@ -245,8 +245,11 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
         # config file, never from code (2.3b).
         with tracer.start_as_current_span("extraction.route") as route_span:
             route_span.set_attribute("openinference.span.kind", "CHAIN")
-            routing = route_extraction(confidence.signals, get_confidence_model(), definition)
+            routing = route_extraction(
+                confidence.signals, confidence_model_for(definition), definition
+            )
             route_span.set_attribute("routing.decision", routing.decision)
+            route_span.set_attribute("routing.calibration", routing.calibration)
             route_span.set_attribute("routing.threshold", routing.threshold)
             route_span.set_attribute("routing.model_version", routing.model_version)
             route_span.set_attribute("routing.flagged_fields", list(routing.flagged_fields))
@@ -274,6 +277,7 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
                 "routing_decision": routing.decision,
                 "flagged_fields": list(routing.flagged_fields),
                 "confidence_model_version": routing.model_version,
+                "confidence_calibration": routing.calibration,
             },
         )
 
@@ -320,6 +324,7 @@ def _store_extraction(
             doc_confidence=routing.doc_confidence if routing else confidence.doc_confidence,
             routing_decision=routing.decision if routing else None,
             confidence_model_version=routing.model_version if routing else None,
+            confidence_calibration=routing.calibration if routing else None,
             pipeline_slug=definition.slug,
             pipeline_version=definition.version,
             confidence_signals=confidence.signals,

@@ -208,6 +208,7 @@ def test_confidence_is_persisted_end_to_end(stack):
         assert float(extraction.doc_confidence) >= model.threshold
         assert extraction.routing_decision == "approved"
         assert extraction.confidence_model_version == model.version
+        assert extraction.confidence_calibration == "invoice"
         signals = extraction.confidence_signals
         assert signals["attempts"] == 1
         assert signals["rule.subtotal_plus_tax_equals_total"] is True
@@ -301,6 +302,9 @@ def test_a_purchase_order_flows_through_the_same_worker(stack):
         ).first()
         assert extraction.pipeline_slug == "purchase_order"
         assert extraction.pipeline_version == 1
+        # The purchase order has no calibration of its own yet, and the row
+        # says so rather than implying the weights were fitted for it.
+        assert extraction.confidence_calibration == "borrowed:invoice"
         assert extraction.validation_passed is True
         # the purchase order's own rules ran, not the invoice's
         assert set(extraction.validation) == {

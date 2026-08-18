@@ -21,6 +21,7 @@ looked wrong.
 """
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from functools import lru_cache
@@ -28,6 +29,8 @@ from pathlib import Path
 
 from docfactory_core.config import get_settings
 from docfactory_core.pipeline import PipelineDefinition
+
+log = logging.getLogger(__name__)
 
 # Feature names in fitted-weight order. Small and individually meaningful so a
 # saved config can be read and argued with rather than merely applied.
@@ -114,6 +117,25 @@ class ConfidenceModel:
     std: tuple[float, ...]
     threshold: float
     source: str
+    # The pipeline the study fitted this on. A model served to a different
+    # pipeline is a borrow — legitimate, but it must be visible: the weights
+    # were measured against another document type's error distribution.
+    calibrated_for: str | None = None
+
+    def calibration_for(self, slug: str) -> str:
+        """How this model relates to the pipeline it is about to score.
+
+        Recorded on every extraction, so an approval can be traced not just to
+        the weights that approved it but to whether those weights were ever
+        measured on this document type.
+        """
+        if self.calibrated_for is None:
+            return "uncalibrated"
+        return (
+            self.calibrated_for
+            if self.calibrated_for == slug
+            else f"borrowed:{self.calibrated_for}"
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> "ConfidenceModel":
@@ -135,6 +157,7 @@ class ConfidenceModel:
             std=tuple(float(s) for s in payload["standardization"]["std"]),
             threshold=float(payload["operating_point"]["threshold"]),
             source=str(path),
+            calibrated_for=(payload.get("calibrated_for") or {}).get("pipeline_slug"),
         )
 
     def probability(self, features: list[float]) -> float:
@@ -154,6 +177,9 @@ class RoutingDecision:
     flagged_fields: tuple[str, ...]
     model_version: int
     threshold: float
+    # "invoice" when the serving model was fitted on this pipeline;
+    # "borrowed:invoice" when it was fitted on another.
+    calibration: str = "unknown"
 
 
 def route_extraction(
@@ -175,10 +201,36 @@ def route_extraction(
         flagged_fields=flagged,
         model_version=model.version,
         threshold=model.threshold,
+        calibration=model.calibration_for(definition.slug),
     )
 
 
 @lru_cache
-def get_confidence_model() -> ConfidenceModel:
-    """The configured model, loaded once per process."""
-    return ConfidenceModel.load(get_settings().confidence_model_path)
+def get_confidence_model(path: str | None = None) -> ConfidenceModel:
+    """A fitted model, loaded once per process per path."""
+    return ConfidenceModel.load(path or get_settings().confidence_model_path)
+
+
+def confidence_model_for(definition: PipelineDefinition) -> ConfidenceModel:
+    """The model a pipeline routes with.
+
+    The definition names its own file; a pipeline that names none falls back to
+    the deployment default, which is a *borrow* — the weights were fitted on
+    whatever type the study ran on. That is allowed and sometimes sensible
+    (the features are kind-driven, so the vectors still mean something), but it
+    is never silent: it is warned once and recorded on every extraction.
+    """
+    model = get_confidence_model(definition.confidence_model_path)
+    calibration = model.calibration_for(definition.slug)
+    if calibration.startswith("borrowed") or calibration == "uncalibrated":
+        _warn_borrowed(definition.slug, model.source, calibration)
+    return model
+
+
+@lru_cache
+def _warn_borrowed(slug: str, source: str, calibration: str) -> None:
+    """Once per (pipeline, model file) per process — a warning, not a stream."""
+    log.warning(
+        "serving a confidence model that was not calibrated for this pipeline",
+        extra={"pipeline_slug": slug, "model": source, "calibration": calibration},
+    )

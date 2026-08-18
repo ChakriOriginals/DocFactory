@@ -54,6 +54,11 @@
       "note": "What max-coverage selection would have picked. Rejected: it auto-approves wrong invoice totals to buy ~1.4% throughput."
     }
   },
+  "calibrated_for": {
+    "pipeline_slug": "invoice",
+    "pipeline_version": 1,
+    "note": "The 2.2c study ran on the invoice corpus only. Serving this model to another pipeline is a borrow, and routing records it as such."
+  },
   "provenance": {
     "fitted_at": "2026-08-18T02:35:29+00:00",
     "git_sha": "4e11efd",

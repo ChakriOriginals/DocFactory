@@ -224,5 +224,8 @@
       }
     }
   },
+  "confidence": {
+    "model_path": "config/confidence_model_v2.json"
+  },
   "sla_hours": 24
 }
