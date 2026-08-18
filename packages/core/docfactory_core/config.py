@@ -51,6 +51,12 @@ class Settings(BaseSettings):
     # Hard cap on thinking + response tokens per call.
     llm_max_tokens: int = 8192
 
+    # Deterministic labelled-error injection for the calibration study.
+    # 0.0 keeps mock extraction clean, so ordinary tests, evals and pipeline
+    # runs are unaffected; the study raises it explicitly.
+    mock_corruption_rate: float = 0.0
+    mock_corruption_seed: int = 1337
+
     # Below this many extracted characters a PDF is treated as image-only
     # (needs_ocr). A real one-page invoice yields several hundred.
     min_parse_chars: int = 100

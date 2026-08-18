@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from docfactory_core.config import Settings, get_settings
+from docfactory_core.corruption import apply_corruption, plan_corruption
 
 
 class LLMRefusalError(RuntimeError):
@@ -109,12 +110,24 @@ class MockLLMClient:
     provider = "mock"
     model = "mock-extractor-v1"
 
+    def __init__(self, settings: Settings | None = None) -> None:
+        settings = settings or get_settings()
+        self._corruption_rate = settings.mock_corruption_rate
+        self._corruption_seed = settings.mock_corruption_seed
+
     def complete(
         self, *, system: str, messages: list[dict], output_schema: dict | None = None
     ) -> LLMResponse:
         time.sleep(random.uniform(0.02, 0.08))
         text = self._document_text(messages)
         payload = self._heuristic_extract(text)
+        # Labelled error injection for the calibration study. Off unless
+        # MOCK_CORRUPTION_RATE is set; deterministic in (seed, document) so a
+        # study re-run reproduces the same corpus and can recompute the label
+        # without it being threaded back through this interface.
+        if self._corruption_rate > 0:
+            plan = plan_corruption(text, rate=self._corruption_rate, seed=self._corruption_seed)
+            payload = apply_corruption(payload, plan, seed=self._corruption_seed)
         content = json.dumps(payload, ensure_ascii=False)
         return LLMResponse(
             content=content,
