@@ -157,7 +157,8 @@ def evaluate_document(
 def render_section(
     definition: PipelineDefinition,
     results: list[DocResult],
-    golden_size: int,
+    requested_size: int,
+    capped_size: int,
     total: int,
 ) -> str:
     digital = [r for r in results if not r.needs_ocr]
@@ -178,7 +179,12 @@ def render_section(
         f"## {definition.document_type} (`{definition.slug}` v{definition.version})",
         "",
         f"- golden set: {len(results)} of {total} docs, deterministic sha256(doc_id) split"
-        + (f" (limited from {golden_size})" if len(results) < golden_size else ""),
+        + (
+            f", capped at a third of the corpus (asked {requested_size})"
+            if capped_size < requested_size
+            else ""
+        )
+        + (f", limited to the first {len(results)}" if len(results) < capped_size else ""),
         f"- digital evaluated: {len(digital)} · needs_ocr (excluded, no text layer): {needs_ocr}"
         f" · extraction failures (counted as wrong): {failed}",
         "",
@@ -209,7 +215,12 @@ def evaluate_type(
         for line in ground_truth_path(pdf_dir, slug).read_text().splitlines()
         if line.strip()
     ]
-    golden = golden_split(records, golden_size)
+    # A golden set is never more than a third of a corpus: the rest has to
+    # stay available as holdout for the calibration study. That is what keeps
+    # a smaller second corpus from being almost entirely golden, without
+    # per-type configuration.
+    capped = min(golden_size, max(1, len(records) // 3))
+    golden = golden_split(records, capped)
     if limit:
         golden = golden[:limit]
     print(f"evaluating {len(golden)} golden {slug} docs ...")
@@ -220,7 +231,7 @@ def evaluate_type(
                 golden,
             )
         )
-    return definition, results, len(records)
+    return definition, results, len(records), capped
 
 
 def main() -> None:
@@ -261,7 +272,7 @@ def main() -> None:
         "",
     ]
     for slug in slugs:
-        definition, results, total = evaluate_type(
+        definition, results, total, capped = evaluate_type(
             slug,
             args.pdf_dir,
             args.golden_size,
@@ -270,7 +281,7 @@ def main() -> None:
             client,
             settings.min_parse_chars,
         )
-        sections.append(render_section(definition, results, args.golden_size, total))
+        sections.append(render_section(definition, results, args.golden_size, capped, total))
         sections.append("")
 
     report = "\n".join(sections).rstrip() + "\n"

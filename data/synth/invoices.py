@@ -20,6 +20,7 @@ from faker import Faker
 
 LAYOUTS = ("classic", "modern", "euro")
 SCAN_FRACTION = 0.3
+TEMPLATE_VAR = "inv"
 CENT = Decimal("0.01")
 
 # Corpus dates are relative to this fixed day, never to "today".
@@ -227,6 +228,14 @@ def generate_invoice(index: int, rng: random.Random, fake_us: Faker, fake_de: Fa
         total=total,
         payment_note=payment_note,
     )
+
+
+def template_for(invoice: Invoice) -> str:
+    return f"{invoice.layout}.html.j2"
+
+
+def render_context(invoice: Invoice) -> dict:
+    return {TEMPLATE_VAR: invoice}
 
 
 def generate_corpus(count: int, seed: int) -> list[Invoice]:

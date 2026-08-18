@@ -13,6 +13,8 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Protocol
 
 from docfactory_core.config import Settings, get_settings
@@ -101,24 +103,39 @@ class AnthropicLLMClient:
 
 
 # --- mock backend ---------------------------------------------------------
+#
+# The mock stands in for the model, so it has to be able to read a document
+# type it was not written for. The *algorithms* here are generic — find a
+# labelled amount, read the dates in printed order, walk an item table — while
+# the vocabulary that makes them work on a particular layout (which words
+# label a total, what an order number looks like) is per-type configuration in
+# config/mock_extraction/. A new document type therefore needs a hints file,
+# not a new branch in this module.
 
 _US_MONEY = re.compile(r"\$\s?[\d,]+\.\d{2}")
 _EU_MONEY = re.compile("[\\d.]*\\d+,\\d{2}[\\s\\u00a0\\u202f]*\u20ac")
 _DATES = re.compile(r"\d{2}/\d{2}/\d{4}|\d{2}\.\d{2}\.\d{4}|[A-Z][a-z]{2,8} \d{1,2}, \d{4}")
-_INVOICE_NO = re.compile(r"INV-\d{4}-\d{5}|RE-\d{4}/\d{4}|\b\d{6}-\d{4}\b")
 _RATE = re.compile(r"([\d.,]+)\s*%")
 _INT_TOKEN = re.compile(r"^\d+$")
 
-_SKIP_PREFIXES = (
-    "invoice", "due date", "bill to", "billed to", "tax invoice",
-    "rechnung", "fällig", "ust-idnr", "pos.", "description", "qty",
-    "zahlbar", "please reference",
-)  # fmt: skip
-_TITLE_WORDS = {"INVOICE", "TAXINVOICE", "RECHNUNG"}
-_ITEM_HEADERS = ("DESCRIPTION", "QTY ITEM", "Pos. Beschreibung")
-_SUBTOTAL_KEYS = ("Subtotal", "Zwischensumme")
-_TAX_KEYS = ("Sales Tax", "Tax ", "MwSt")
-_TOTAL_KEYS = ("Total Due", "Amount Due", "Gesamtbetrag")
+HINTS_DIR = Path(__file__).resolve().parents[3] / "config" / "mock_extraction"
+
+
+class MockHintsError(RuntimeError):
+    """No mock reading hints for a pipeline — the mock cannot fake that type."""
+
+
+@lru_cache
+def load_hints(slug: str, version: int = 1) -> dict:
+    path = HINTS_DIR / f"{slug}_v{version}.json"
+    if not path.is_file():
+        raise MockHintsError(
+            f"no mock extraction hints for pipeline {slug!r} v{version} ({path}). "
+            "The mock backend reads documents heuristically and needs to be told "
+            "how this document type prints its fields; use MODEL_PROVIDER=anthropic "
+            "for a type without hints."
+        )
+    return json.loads(path.read_text())
 
 
 class MockLLMClient:
@@ -139,8 +156,12 @@ class MockLLMClient:
         definition: PipelineDefinition | None = None,
     ) -> LLMResponse:
         time.sleep(random.uniform(0.02, 0.08))
+        if definition is None:
+            from docfactory_core.pipeline_registry import default_pipeline
+
+            definition = default_pipeline()
         text = self._document_text(messages)
-        payload = self._heuristic_extract(text)
+        payload = heuristic_extract(text, load_hints(definition.slug, definition.version))
         # Labelled error injection for the calibration study. Off unless
         # MOCK_CORRUPTION_RATE is set; deterministic in (seed, document) so a
         # study re-run reproduces the same corpus and can recompute the label
@@ -164,118 +185,165 @@ class MockLLMClient:
                 return str(message["content"]).split("document text:", 1)[1]
         return str(messages[-1].get("content", ""))
 
-    def _heuristic_extract(self, text: str) -> dict:
-        lines = self._rejoin_smallcaps([line.strip() for line in text.splitlines() if line.strip()])
-        currency = "EUR" if "€" in text else "USD"
-        money_re = _EU_MONEY if currency == "EUR" else _US_MONEY
 
-        number_match = _INVOICE_NO.search(text)
-        dates = _DATES.findall(text)
-        rate_match = _RATE.search(text)
+def heuristic_extract(text: str, hints: dict) -> dict:
+    """Read a document the way a cheap extractor would, guided by hints."""
+    lines = _rejoin_smallcaps([line.strip() for line in text.splitlines() if line.strip()])
+    currency = "EUR" if "\u20ac" in text else "USD"
+    money_re = _EU_MONEY if currency == "EUR" else _US_MONEY
 
-        subtotal = self._labeled_amount(lines, _SUBTOTAL_KEYS, money_re)
-        tax = self._labeled_amount(lines, _TAX_KEYS, money_re)
-        total = self._labeled_amount(lines, _TOTAL_KEYS, money_re)
-        items = self._line_items(lines, money_re, currency)
+    record: dict = {}
+    for name in hints.get("currency_fields", ()):
+        record[name] = currency
 
-        if subtotal is None and items:
-            from docfactory_core.normalize import normalize_amount
+    for name, pattern in hints.get("id_fields", {}).items():
+        match = re.search(pattern, text)
+        record[name] = match.group(0) if match else "UNKNOWN"
 
-            subtotal = str(sum(normalize_amount(i["amount"]) for i in items))
-        return {
-            "vendor": self._vendor(lines),
-            "invoice_number": number_match.group(0) if number_match else "UNKNOWN",
-            "invoice_date": dates[0] if dates else "1970-01-01",
-            "due_date": dates[1] if len(dates) > 1 else (dates[0] if dates else "1970-01-01"),
-            "currency": currency,
-            "subtotal": subtotal or "0",
-            "tax_rate": rate_match.group(0) if rate_match else "0",
-            "tax": tax or "0",
-            "total": total or subtotal or "0",
-            "line_items": items
-            or [{"description": "unknown", "quantity": "1", "unit_price": "0", "amount": "0"}],
-        }
+    for name, rules in hints.get("heading_fields", {}).items():
+        record[name] = _heading_value(lines, rules)
 
-    @staticmethod
-    def _rejoin_smallcaps(lines: list[str]) -> list[str]:
-        """The euro layout's small-caps vendor renders as 'B' + 'aum' lines."""
-        joined: list[str] = []
-        skip_next = False
-        for i, line in enumerate(lines):
-            if skip_next:
-                skip_next = False
-                continue
-            nxt = lines[i + 1] if i + 1 < len(lines) else ""
-            if len(line) == 1 and line.isupper() and nxt[:1].islower():
-                joined.append(line + nxt)
-                skip_next = True
-            else:
-                joined.append(line)
-        return joined
+    for name, rules in hints.get("labeled_fields", {}).items():
+        record[name] = _labeled_value(lines, rules)
 
-    @staticmethod
-    def _vendor(lines: list[str]) -> str:
-        for line in lines:
-            plain = line.replace(" ", "").upper()
-            if len(line) <= 1 or plain in _TITLE_WORDS:
-                continue
-            if any(line.lower().startswith(prefix) for prefix in _SKIP_PREFIXES):
-                continue
-            # modern layout glues the logo initial on: "Fernandez-Harris F"
-            tokens = line.split()
-            if len(tokens) > 1 and len(tokens[-1]) == 1 and tokens[-1] == line[0]:
-                tokens = tokens[:-1]
-            return " ".join(tokens)
-        return "UNKNOWN"
+    # Dates in printed order: the hints say which field each position is.
+    dates = _DATES.findall(text)
+    for index, name in enumerate(hints.get("date_fields", ())):
+        if len(dates) > index:
+            record[name] = dates[index]
+        else:
+            record[name] = dates[0] if dates else "1970-01-01"
 
-    @staticmethod
-    def _labeled_amount(
-        lines: list[str], keys: tuple[str, ...], money_re: re.Pattern
-    ) -> str | None:
-        for line in lines:
-            if any(key in line for key in keys):
-                amounts = money_re.findall(line)
-                if amounts:
-                    return amounts[-1]
-        return None
+    for name in hints.get("rate_fields", ()):
+        match = _RATE.search(text)
+        record[name] = match.group(0) if match else "0"
 
-    @staticmethod
-    def _line_items(lines: list[str], money_re: re.Pattern, currency: str) -> list[dict]:
-        start = next((i for i, ln in enumerate(lines) if any(h in ln for h in _ITEM_HEADERS)), None)
-        if start is None:
-            return []
-        items = []
-        for line in lines[start + 1 :]:
-            if any(key in line for key in _SUBTOTAL_KEYS):
-                break
+    table = hints.get("table")
+    rows: list[dict] = []
+    if table:
+        rows = _table_rows(lines, money_re, currency, table)
+        record[table["field"]] = rows or [dict(table["empty_row"])]
+
+    for name, keys in hints.get("labeled_amounts", {}).items():
+        record[name] = _labeled_amount(lines, tuple(keys), money_re)
+    for name, fallback in hints.get("amount_fallbacks", {}).items():
+        if record.get(name) is None:
+            record[name] = _fallback_amount(fallback, record, rows)
+    for name in hints.get("labeled_amounts", {}):
+        if record.get(name) is None:
+            record[name] = "0"
+    return record
+
+
+def _fallback_amount(spec: str, record: dict, rows: list[dict]) -> str | None:
+    """A missing amount derived from what was read: 'sum:<column>' or 'field:<name>'."""
+    kind, _, argument = spec.partition(":")
+    if kind == "sum":
+        if not rows:
+            return None
+        from docfactory_core.normalize import normalize_amount
+
+        return str(sum(normalize_amount(row[argument]) for row in rows))
+    if kind == "field":
+        return record.get(argument)
+    raise MockHintsError(f"unknown amount fallback: {spec!r}")
+
+
+def _rejoin_smallcaps(lines: list[str]) -> list[str]:
+    """The euro layout's small-caps vendor renders as 'B' + 'aum' lines."""
+    joined: list[str] = []
+    skip_next = False
+    for i, line in enumerate(lines):
+        if skip_next:
+            skip_next = False
+            continue
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if len(line) == 1 and line.isupper() and nxt[:1].islower():
+            joined.append(line + nxt)
+            skip_next = True
+        else:
+            joined.append(line)
+    return joined
+
+
+def _heading_value(lines: list[str], rules: dict) -> str:
+    """The first line that reads like a name rather than a label or a title."""
+    skip_prefixes = tuple(rules.get("skip_prefixes", ()))
+    title_words = {word.upper() for word in rules.get("title_words", ())}
+    for line in lines:
+        plain = line.replace(" ", "").upper()
+        if len(line) <= 1 or plain in title_words:
+            continue
+        if any(line.lower().startswith(prefix) for prefix in skip_prefixes):
+            continue
+        # modern layout glues the logo initial on: "Fernandez-Harris F"
+        tokens = line.split()
+        if len(tokens) > 1 and len(tokens[-1]) == 1 and tokens[-1] == line[0]:
+            tokens = tokens[:-1]
+        return " ".join(tokens)
+    return "UNKNOWN"
+
+
+def _labeled_value(lines: list[str], rules: dict) -> str:
+    """The text printed after a label, e.g. "Vendor: Ohlmann KG"."""
+    labels = tuple(rules.get("labels", ()))
+    for line in lines:
+        for label in labels:
+            if line.startswith(label):
+                value = line[len(label) :].strip(" :\t")
+                if value:
+                    return value
+    return "UNKNOWN"
+
+
+def _labeled_amount(lines: list[str], keys: tuple[str, ...], money_re: re.Pattern) -> str | None:
+    for line in lines:
+        if any(key in line for key in keys):
             amounts = money_re.findall(line)
-            if len(amounts) < 2:
-                continue
-            remainder = line
-            for amount in amounts:
-                remainder = remainder.replace(amount, "")
-            tokens = remainder.split()
-            quantity = "1"
-            if currency == "EUR":
-                # euro rows: <pos> <description> <qty>
-                if tokens and _INT_TOKEN.match(tokens[0]):
-                    tokens = tokens[1:]
-                if tokens and _INT_TOKEN.match(tokens[-1]):
-                    quantity = tokens.pop()
-            elif tokens and _INT_TOKEN.match(tokens[0]):
-                # modern rows: <qty> <description>
-                quantity = tokens.pop(0)
-            elif tokens and _INT_TOKEN.match(tokens[-1]):
-                # classic rows: <description> <qty>
+            if amounts:
+                return amounts[-1]
+    return None
+
+
+def _table_rows(lines: list[str], money_re: re.Pattern, currency: str, table: dict) -> list[dict]:
+    headers = tuple(table.get("headers", ()))
+    stop_keys = tuple(table.get("stop_keys", ()))
+    columns = table["columns"]
+    start = next((i for i, ln in enumerate(lines) if any(h in ln for h in headers)), None)
+    if start is None:
+        return []
+    rows = []
+    for line in lines[start + 1 :]:
+        if any(key in line for key in stop_keys):
+            break
+        amounts = money_re.findall(line)
+        if len(amounts) < 2:
+            continue
+        remainder = line
+        for amount in amounts:
+            remainder = remainder.replace(amount, "")
+        tokens = remainder.split()
+        quantity = "1"
+        if currency == "EUR":
+            # euro rows: <pos> <description> <qty>
+            if tokens and _INT_TOKEN.match(tokens[0]):
+                tokens = tokens[1:]
+            if tokens and _INT_TOKEN.match(tokens[-1]):
                 quantity = tokens.pop()
-            description = " ".join(tokens).strip(" ·")
-            if description:
-                items.append(
-                    {
-                        "description": description,
-                        "quantity": quantity,
-                        "unit_price": amounts[-2],
-                        "amount": amounts[-1],
-                    }
-                )
-        return items
+        elif tokens and _INT_TOKEN.match(tokens[0]):
+            # modern rows: <qty> <description>
+            quantity = tokens.pop(0)
+        elif tokens and _INT_TOKEN.match(tokens[-1]):
+            # classic rows: <description> <qty>
+            quantity = tokens.pop()
+        description = " ".join(tokens).strip(" \u00b7")
+        if description:
+            rows.append(
+                {
+                    columns["description"]: description,
+                    columns["quantity"]: quantity,
+                    columns["unit_price"]: amounts[-2],
+                    columns["amount"]: amounts[-1],
+                }
+            )
+    return rows

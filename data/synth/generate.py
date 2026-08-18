@@ -1,13 +1,18 @@
-"""Synthetic invoice corpus — render pipeline + CLI.
+"""Synthetic document corpus — render pipeline + CLI.
 
-HTML (Jinja2) -> PDF (WeasyPrint). ~30% of documents are re-rasterized with
-mild rotation/noise/JPEG artifacts to simulate scans; those PDFs have no text
-layer, so the Tier-A (digital text) parse path cannot read them — that is
-intentional, they seed the later OCR tier and the DLQ story.
+HTML (Jinja2) -> PDF (WeasyPrint). A quarter to a third of documents are
+re-rasterized with mild rotation/noise/JPEG artifacts to simulate scans; those
+PDFs have no text layer, so the Tier-A (digital text) parse path cannot read
+them — that is intentional, they seed the later OCR tier and the DLQ story.
+
+One document type per run (`--type`), each with its own seed, its own labels
+file and its own doc_id prefix, so generating a second type cannot perturb the
+first type's corpus or its golden split. A type is a module in this directory
+exposing generate_corpus / template_for / render_context / ground_truth_record.
 
 Run via `make seed`, or directly:
     DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib \
-        uv run python data/synth/generate.py --count 500 --upload --previews
+        uv run python data/synth/generate.py --type invoice --count 500 --upload
 """
 
 import argparse
@@ -19,7 +24,12 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
-from invoices import Invoice, generate_corpus, ground_truth_record
+import invoices
+import purchase_orders
+
+# The document types this generator can produce. Adding one is a module here
+# plus its templates — no change to the render pipeline below.
+TYPES = {"invoice": invoices, "purchase_order": purchase_orders}
 
 SYNTH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SYNTH_DIR.parent.parent
@@ -63,7 +73,7 @@ def _env():
     return _jinja_env
 
 
-def render_pdf(invoice: Invoice) -> bytes:
+def render_pdf(document, module) -> bytes:
     try:
         import weasyprint
     except OSError as exc:  # missing native libs is the common failure on macOS
@@ -76,8 +86,12 @@ def render_pdf(invoice: Invoice) -> bytes:
     import logging
 
     logging.getLogger("weasyprint").setLevel(logging.ERROR)
-    html = _env().get_template(f"{invoice.layout}.html.j2").render(inv=invoice)
-    return weasyprint.HTML(string=html).write_pdf()
+    template = _env().get_template(module.template_for(document))
+    return weasyprint.HTML(string=html_of(template, module, document)).write_pdf()
+
+
+def html_of(template, module, document) -> str:
+    return template.render(**module.render_context(document))
 
 
 def simulate_scan(pdf_bytes: bytes, rng: random.Random) -> bytes:
@@ -108,34 +122,39 @@ def simulate_scan(pdf_bytes: bytes, rng: random.Random) -> bytes:
     return out.getvalue()
 
 
-def build_document(invoice: Invoice, master_seed: int) -> tuple[str, bytes]:
-    pdf = render_pdf(invoice)
-    if invoice.scanned:
+def build_document(document, module, master_seed: int) -> tuple[str, bytes]:
+    pdf = render_pdf(document, module)
+    if document.scanned:
         # Seed per-document so output is identical regardless of worker scheduling.
         # (String seeds hash via sha512 — stable across processes and runs.)
-        rng = random.Random(f"{master_seed}:{invoice.doc_id}")
+        rng = random.Random(f"{master_seed}:{document.doc_id}")
         pdf = simulate_scan(pdf, rng)
-    return invoice.doc_id, pdf
+    return document.doc_id, pdf
 
 
-def _worker(args: tuple[Invoice, int]) -> tuple[str, bytes]:
-    return build_document(*args)
+def _worker(args: tuple[object, str, int]) -> tuple[str, bytes]:
+    document, doc_type, master_seed = args
+    return build_document(document, TYPES[doc_type], master_seed)
 
 
-def write_previews(corpus: list[Invoice], out_dir: Path) -> list[Path]:
+def write_previews(corpus: list, out_dir: Path, doc_type: str) -> list[Path]:
     """One PNG per layout (digital) plus one scanned example, for docs/."""
     import pypdfium2 as pdfium
 
     SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
-    picks: dict[str, Invoice] = {}
-    for invoice in corpus:
-        if not invoice.scanned and invoice.layout not in picks:
-            picks[invoice.layout] = invoice
-        if invoice.scanned and "scanned" not in picks:
-            picks["scanned"] = invoice
+    # The invoice samples keep their original names; later types are prefixed,
+    # since layout names (e.g. "euro") repeat across types.
+    prefix = "" if doc_type == "invoice" else f"{doc_type}_"
+    picks: dict[str, object] = {}
+    for document in corpus:
+        if not document.scanned and document.layout not in picks:
+            picks[document.layout] = document
+        if document.scanned and "scanned" not in picks:
+            picks["scanned"] = document
     written = []
-    for name, invoice in sorted(picks.items()):
-        pdf_path = out_dir / f"{invoice.doc_id}.pdf"
+    for name, document in sorted(picks.items()):
+        name = f"{prefix}{name}"
+        pdf_path = out_dir / f"{document.doc_id}.pdf"
         page = pdfium.PdfDocument(pdf_path.read_bytes())[0]
         png_path = SAMPLES_DIR / f"{name}.png"
         page.render(scale=144 / 72).to_pil().save(png_path)
@@ -143,7 +162,7 @@ def write_previews(corpus: list[Invoice], out_dir: Path) -> list[Path]:
     return written
 
 
-def upload_corpus(out_dir: Path, records: list[dict], tenant_id: str) -> int:
+def upload_corpus(out_dir: Path, records: list[dict], tenant_id: str, doc_type: str) -> int:
     sys.path.insert(0, str(REPO_ROOT))
     from docfactory_core.storage import ObjectStore
 
@@ -152,16 +171,23 @@ def upload_corpus(out_dir: Path, records: list[dict], tenant_id: str) -> int:
     for record in records:
         pdf_path = out_dir / record["file"]
         store.put_object(record["s3_key"], pdf_path.read_bytes(), content_type="application/pdf")
+    labels = labels_path(out_dir, doc_type)
     store.put_object(
-        f"{tenant_id}/synth/ground_truth.jsonl",
-        (out_dir / "ground_truth.jsonl").read_bytes(),
+        f"{tenant_id}/synth/{labels.name}",
+        labels.read_bytes(),
         content_type="application/jsonl",
     )
     return len(records) + 1
 
 
+def labels_path(out_dir: Path, doc_type: str) -> Path:
+    """One labels file per document type — the eval splits within a type."""
+    return out_dir / f"ground_truth_{doc_type}.jsonl"
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate the synthetic invoice corpus")
+    parser = argparse.ArgumentParser(description="Generate a synthetic document corpus")
+    parser.add_argument("--type", dest="doc_type", choices=sorted(TYPES), default="invoice")
     parser.add_argument("--count", type=int, default=500)
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
@@ -171,15 +197,18 @@ def main() -> None:
     parser.add_argument("--tenant", default="dev-tenant")
     args = parser.parse_args()
 
+    module = TYPES[args.doc_type]
     started = time.monotonic()
-    corpus = generate_corpus(args.count, args.seed)
+    corpus = module.generate_corpus(args.count, args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
 
     total_bytes = 0
     done = 0
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
         for doc_id, pdf in pool.map(
-            _worker, ((invoice, args.seed) for invoice in corpus), chunksize=4
+            _worker,
+            ((document, args.doc_type, args.seed) for document in corpus),
+            chunksize=4,
         ):
             (args.out / f"{doc_id}.pdf").write_bytes(pdf)
             total_bytes += len(pdf)
@@ -188,30 +217,27 @@ def main() -> None:
                 print(f"  rendered {done}/{len(corpus)}", flush=True)
 
     records = [
-        ground_truth_record(invoice, s3_key=f"{args.tenant}/synth/{invoice.doc_id}.pdf")
-        for invoice in corpus
+        module.ground_truth_record(document, s3_key=f"{args.tenant}/synth/{document.doc_id}.pdf")
+        for document in corpus
     ]
-    with (args.out / "ground_truth.jsonl").open("w") as fh:
+    with labels_path(args.out, args.doc_type).open("w") as fh:
         for record in records:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    scanned = sum(1 for invoice in corpus if invoice.scanned)
-    by_layout = {
-        layout: sum(1 for i in corpus if i.layout == layout)
-        for layout in ("classic", "modern", "euro")
-    }
+    scanned = sum(1 for document in corpus if document.scanned)
+    by_layout = {layout: sum(1 for d in corpus if d.layout == layout) for layout in module.LAYOUTS}
     print(
-        f"generated {len(corpus)} invoices in {time.monotonic() - started:.1f}s "
+        f"generated {len(corpus)} {args.doc_type} docs in {time.monotonic() - started:.1f}s "
         f"({total_bytes / 1e6:.1f} MB) -> {args.out}"
     )
     print(f"  layouts: {by_layout}, scanned (no text layer): {scanned}")
 
     if args.previews:
-        for path in write_previews(corpus, args.out):
+        for path in write_previews(corpus, args.out, args.doc_type):
             print(f"  preview: {path.relative_to(REPO_ROOT)}")
 
     if args.upload:
-        uploaded = upload_corpus(args.out, records, args.tenant)
+        uploaded = upload_corpus(args.out, records, args.tenant, args.doc_type)
         print(f"  uploaded {uploaded} objects to s3://docfactory/{args.tenant}/synth/")
 
 

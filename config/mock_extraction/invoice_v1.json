@@ -1,0 +1,44 @@
+{
+  "currency_fields": ["currency"],
+  "id_fields": {
+    "invoice_number": "INV-\\d{4}-\\d{5}|RE-\\d{4}/\\d{4}|\\b\\d{6}-\\d{4}\\b"
+  },
+  "heading_fields": {
+    "vendor": {
+      "title_words": ["INVOICE", "TAXINVOICE", "RECHNUNG"],
+      "skip_prefixes": [
+        "invoice", "due date", "bill to", "billed to", "tax invoice",
+        "rechnung", "fällig", "ust-idnr", "pos.", "description", "qty",
+        "zahlbar", "please reference"
+      ]
+    }
+  },
+  "date_fields": ["invoice_date", "due_date"],
+  "rate_fields": ["tax_rate"],
+  "table": {
+    "field": "line_items",
+    "headers": ["DESCRIPTION", "QTY ITEM", "Pos. Beschreibung"],
+    "stop_keys": ["Subtotal", "Zwischensumme"],
+    "columns": {
+      "description": "description",
+      "quantity": "quantity",
+      "unit_price": "unit_price",
+      "amount": "amount"
+    },
+    "empty_row": {
+      "description": "unknown",
+      "quantity": "1",
+      "unit_price": "0",
+      "amount": "0"
+    }
+  },
+  "labeled_amounts": {
+    "subtotal": ["Subtotal", "Zwischensumme"],
+    "tax": ["Sales Tax", "Tax ", "MwSt"],
+    "total": ["Total Due", "Amount Due", "Gesamtbetrag"]
+  },
+  "amount_fallbacks": {
+    "subtotal": "sum:amount",
+    "total": "field:subtotal"
+  }
+}
