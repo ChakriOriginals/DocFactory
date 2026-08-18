@@ -67,7 +67,9 @@ def features_for(
     implicating = [rule for rule in failed if field in rule_fields.get(rule, ())]
 
     residual = 0.0
-    scale = max(abs(float(signals.get("scale") or signals.get("total") or 1.0)), 1.0)
+    # `scale` is the largest money value the extraction carries, whatever the
+    # document type calls it — the scorer computes it from the declared kinds.
+    scale = max(abs(float(signals.get("scale") or 1.0)), 1.0)
     for rule in implicating:
         residual = max(residual, abs(float(signals.get(f"residual.{rule}") or 0.0)))
 
