@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from typing import BinaryIO, Literal
 
 from docfactory_core.auth import AuthError, resolve_tenant
+from docfactory_core.backpressure import check_rate_limit, in_flight
+from docfactory_core.backpressure import queue_depth as broker_queue_depth
 from docfactory_core.bootstrap import ensure_infra
 from docfactory_core.budget import budget_state
 from docfactory_core.config import get_settings
@@ -62,9 +64,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="DocFactory API", lifespan=lifespan)
 
-# Endpoints reachable without a tenant: liveness and the OpenAPI surface.
+# Endpoints reachable without a tenant: liveness, the OpenAPI surface, and the
+# storage-event bridge — whose caller is the object store, which holds no API
+# key and no tenant. It carries its own shared secret instead, and the tenant
+# comes from the object key, resolved in the worker.
 _UNAUTHENTICATED_PATHS = frozenset(
-    {"/healthz", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+    {
+        "/healthz",
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+        "/internal/storage-events",
+    }
 )
 
 
@@ -144,6 +156,10 @@ class SpendSummary(BaseModel):
     remaining_usd: float
     exceeded: bool
     unit_costs: list[UsageRollup]
+    # Operational signals: what the pipeline is carrying right now. Queue depth
+    # is the metric worker autoscaling will target on AWS.
+    in_flight: int
+    queue_depth: dict[str, int]
 
 
 class ReviewTaskSummary(BaseModel):
@@ -197,6 +213,20 @@ def upload_document(
         raise HTTPException(
             status_code=400,
             detail=f"unknown doc_type {doc_type!r}; available: {list(available_slugs())}",
+        )
+
+    # Backpressure: over the tenant's rate is a clean 429 with a Retry-After,
+    # never a silent drop. The bucket is shared across API processes, so the
+    # limit belongs to the tenant rather than to whichever replica answered.
+    decision = check_rate_limit(tenant_id)
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"rate limit exceeded for tenant {tenant_id}; "
+                f"retry in {decision.retry_after_seconds:.1f}s"
+            ),
+            headers={"Retry-After": str(max(int(decision.retry_after_seconds), 1))},
         )
 
     sha256, size = _hash_stream(file.file)
@@ -264,6 +294,33 @@ def upload_document(
         return UploadResponse(document_id=document.id, status=DocumentStatus.RECEIVED)
 
 
+@app.post("/internal/storage-events", status_code=202, include_in_schema=False)
+async def storage_events(request: Request) -> dict:
+    """Local bridge: MinIO bucket notifications onto the ingest queue.
+
+    MinIO cannot publish to ElasticMQ, so locally it posts the S3-shaped event
+    here and this republishes it unchanged. On AWS, S3 publishes to SQS
+    directly and this endpoint is not deployed — the event body, the queue and
+    the worker handler are identical either way, which is the point.
+
+    Authenticated by a shared secret rather than an API key: the caller is the
+    object store, which has no tenant of its own. The tenant is derived from
+    the object key, inside the worker.
+    """
+    settings = get_settings()
+    token = request.headers.get("authorization", "")
+    expected = f"Bearer {settings.ingest_webhook_token}"
+    if not settings.ingest_webhook_token or token != expected:
+        raise HTTPException(status_code=401, detail="invalid storage-event token")
+
+    payload = await request.json()
+    records = payload.get("Records", [])
+    if not records:
+        return {"accepted": 0}
+    app.state.broker.send(settings.ingest_queue, payload)
+    return {"accepted": len(records)}
+
+
 @app.get("/usage", response_model=SpendSummary)
 def get_usage() -> SpendSummary:
     """This tenant's spend and its unit cost per document type.
@@ -280,6 +337,15 @@ def get_usage() -> SpendSummary:
         budget_usd=float(state.budget_usd),
         remaining_usd=float(state.remaining_usd),
         exceeded=state.exceeded,
+        in_flight=in_flight(tenant_id),
+        queue_depth={
+            queue: broker_queue_depth(app.state.broker, queue)
+            for queue in (
+                get_settings().ingest_queue,
+                get_settings().parse_queue,
+                get_settings().extract_queue,
+            )
+        },
         unit_costs=[
             UsageRollup(
                 pipeline_slug=row.pipeline_slug,

@@ -84,6 +84,30 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **README still describes Phase 0.** It predates every phase since; the
   quickstart commands work but the state description does not.
 
+## From Phase 4b
+
+- **The local storage-event bridge is not the AWS path.** MinIO cannot publish
+  to ElasticMQ, so locally it posts the S3-shaped event to an API endpoint that
+  republishes it onto the ingest queue. On AWS, S3 publishes to SQS directly
+  and the bridge is not deployed. The event body, the queue and the worker
+  handler are identical; the hop is not, and only the AWS deploy proves it.
+- **Queue depth is exposed, not acted on.** `GET /usage` reports it and it is
+  the metric worker autoscaling will target, but nothing throttles on it yet.
+  Inventing a policy before the system has been load-tested would be guessing;
+  Phase 5 measures first.
+- **Rate limits and in-flight ceilings are global settings, not per tenant.**
+  Every tenant gets the same bucket size and the same ceiling. Per-tenant
+  overrides belong on the `tenants` row next to `budget_usd` and
+  `review_sla_hours`, which already work that way.
+- **A deferred message loses its receive count.** Deferral re-sends rather than
+  letting the message redeliver, which is deliberate — being busy must never
+  fill the DLQ — but it also means a document that is deferred forever would
+  never reach the DLQ. A deferral counter on the payload would bound it.
+- **Ingestion assumes one object is one document.** No zip/multi-page-batch
+  unpacking, and a non-PDF drop is logged and dropped rather than reported
+  anywhere the tenant can see. A per-tenant ingestion error surface is a real
+  gap once customers use the drop path.
+
 ## From Phase 4a
 
 - **The mock's token counts are a character-count approximation.** Four

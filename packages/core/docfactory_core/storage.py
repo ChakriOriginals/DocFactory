@@ -51,6 +51,50 @@ class ObjectStore:
             self._s3.create_bucket(**params)
             log.info("created bucket", extra={"bucket": self.bucket})
 
+    def ensure_bucket_notifications(self, target_arn: str, prefix_suffix: str = "") -> bool:
+        """Point object-created events at a notification target.
+
+        This is the same `put_bucket_notification_configuration` call on MinIO
+        and on S3 — only the ARN differs (`arn:minio:sqs::PRIMARY:webhook`
+        locally, an SQS queue ARN on AWS), which is why the ingest path can be
+        built and tested here and deployed unchanged.
+
+        Returns False when the backend has no target configured, so local dev
+        without the notification target set still starts cleanly.
+        """
+        settings = self._settings
+        config = {
+            "QueueConfigurations": [
+                {
+                    "Id": "docfactory-ingest",
+                    "QueueArn": target_arn,
+                    "Events": ["s3:ObjectCreated:*"],
+                    "Filter": {
+                        "Key": {
+                            "FilterRules": [
+                                {"Name": "suffix", "Value": prefix_suffix or ".pdf"},
+                            ]
+                        }
+                    },
+                }
+            ]
+        }
+        try:
+            self._s3.put_bucket_notification_configuration(
+                Bucket=self.bucket, NotificationConfiguration=config
+            )
+        except ClientError as exc:
+            log.warning(
+                "bucket notifications not configured",
+                extra={"bucket": self.bucket, "target": target_arn, "error": str(exc)},
+            )
+            return False
+        log.info(
+            "bucket notifications configured",
+            extra={"bucket": self.bucket, "target": target_arn, "prefix": settings.ingest_prefix},
+        )
+        return True
+
     @staticmethod
     def _assert_tenant_scoped(key: str) -> None:
         """Refuse a key outside the caller's tenant prefix.

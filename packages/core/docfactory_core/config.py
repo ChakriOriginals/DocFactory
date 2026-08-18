@@ -72,6 +72,33 @@ class Settings(BaseSettings):
 
     max_upload_mb: int = 25
 
+    # --- ingestion -------------------------------------------------------
+    # Documents dropped under {tenant}/{ingest_prefix}/ are picked up from a
+    # storage event; the API upload path stays available and both converge on
+    # the same pipeline.
+    ingest_queue: str = "docfactory-ingest"
+    ingest_prefix: str = "dropbox"
+    # Shared secret for the local MinIO -> API notification bridge. On AWS,
+    # S3 delivers to SQS directly and this is unused.
+    ingest_webhook_token: str = "local-ingest-token"
+    # Notification target for object-created events. Locally MinIO's webhook
+    # target (arn:minio:sqs::PRIMARY:webhook), which posts to the API bridge;
+    # on AWS the ingest queue's own ARN, and no bridge is deployed. Empty
+    # disables the batch path, leaving the API upload path alone.
+    ingest_notify_target: str = ""
+
+    # --- backpressure ----------------------------------------------------
+    # Uploads per tenant per minute, and how much of that a burst may spend at
+    # once. Over the rate is a 429 with Retry-After, never a silent drop.
+    rate_limit_per_minute: float = 120.0
+    rate_limit_burst: int = 30
+    # How many documents one tenant may occupy the pipeline with at once. A
+    # message over the ceiling is deferred back to the queue so another
+    # tenant's work is picked up instead — fairness, not throughput.
+    max_in_flight_per_tenant: int = 25
+    # How long a deferred message waits before it is eligible again.
+    defer_seconds: int = 5
+
     # Fitted confidence model consumed by routing. The threshold lives inside
     # this file, never in code, so a refit changes behaviour by swapping the
     # config. Point at a different version to roll forward or back.

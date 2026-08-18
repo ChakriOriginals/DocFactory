@@ -45,8 +45,17 @@ class QueueBroker:
         # Visibility timeout must exceed worst-case processing time or a slow
         # message gets redelivered mid-flight: parse is fast (10s); extract
         # can include a real LLM call plus one retry (90s).
-        visibility = {self._settings.parse_queue: "10", self._settings.extract_queue: "90"}
-        for logical in (self._settings.parse_queue, self._settings.extract_queue):
+        visibility = {
+            self._settings.parse_queue: "10",
+            self._settings.extract_queue: "90",
+            # Ingest fetches an object and writes one row; short and bounded.
+            self._settings.ingest_queue: "30",
+        }
+        for logical in (
+            self._settings.parse_queue,
+            self._settings.extract_queue,
+            self._settings.ingest_queue,
+        ):
             self.ensure_queue_pair(
                 logical,
                 visibility_timeout=visibility[logical],
@@ -83,8 +92,16 @@ class QueueBroker:
         self._urls[dlq_name(logical)] = dlq_url
         return dlq_url
 
-    def send(self, queue: str, payload: dict) -> str:
-        response = self._sqs.send_message(
-            QueueUrl=self.queue_url(queue), MessageBody=json.dumps(payload)
-        )
+    def send(self, queue: str, payload: dict, *, delay_seconds: int = 0) -> str:
+        """Enqueue a message, optionally invisible for a while.
+
+        `delay_seconds` is how backpressure defers work: a message over a
+        tenant's in-flight ceiling goes back to the queue with a delay instead
+        of being processed, so the worker moves straight on to another
+        tenant's message rather than spinning on this one.
+        """
+        kwargs = {"QueueUrl": self.queue_url(queue), "MessageBody": json.dumps(payload)}
+        if delay_seconds:
+            kwargs["DelaySeconds"] = min(delay_seconds, 900)  # SQS ceiling
+        response = self._sqs.send_message(**kwargs)
         return response["MessageId"]

@@ -1,4 +1,4 @@
-"""Worker entrypoint: one process, two consumer threads (parse + extract)."""
+"""Worker entrypoint: one process, three consumer threads (ingest + parse + extract)."""
 
 import logging
 import signal
@@ -11,7 +11,7 @@ from docfactory_core.queues import QueueBroker
 from docfactory_core.tracing import setup_tracing
 
 from docfactory_worker.consumer import Consumer
-from docfactory_worker.handlers import handle_extract, handle_parse
+from docfactory_worker.handlers import handle_extract, handle_ingest, handle_parse
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +31,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, request_stop)
 
     consumers = (
+        # Batch ingestion and the API upload path feed the same parse queue.
+        Consumer(QueueBroker(), settings.ingest_queue, handle_ingest, stop),
         Consumer(QueueBroker(), settings.parse_queue, handle_parse, stop),
         Consumer(QueueBroker(), settings.extract_queue, handle_extract, stop),
     )
@@ -40,7 +42,10 @@ def main() -> None:
     ]
     for thread in threads:
         thread.start()
-    log.info("worker running", extra={"queues": [settings.parse_queue, settings.extract_queue]})
+    log.info(
+        "worker running",
+        extra={"queues": [settings.ingest_queue, settings.parse_queue, settings.extract_queue]},
+    )
     for thread in threads:
         thread.join()
 

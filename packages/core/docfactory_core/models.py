@@ -335,6 +335,26 @@ class TenantSpend(Base):
     )
 
 
+class TenantRateLimit(Base):
+    """A tenant's token bucket, shared by every API process.
+
+    In-process rate limiting is per-process rate limiting: two API replicas
+    would each allow the full rate. The bucket lives here so the limit is the
+    tenant's, not the replica's, and it is spent with a conditional UPDATE for
+    the same reason the budget counter is.
+    """
+
+    __tablename__ = "tenant_rate_limits"
+
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    tokens: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False, server_default="0")
+    refilled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ReviewStatus(enum.StrEnum):
     OPEN = "open"
     RESOLVED = "resolved"

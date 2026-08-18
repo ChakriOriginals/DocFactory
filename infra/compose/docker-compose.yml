@@ -29,6 +29,16 @@ services:
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+      # Batch ingestion: MinIO emits S3-shaped object-created events. It cannot
+      # publish to ElasticMQ, so locally it posts to the API's bridge endpoint,
+      # which republishes onto the ingest queue. On AWS, S3 publishes to SQS
+      # directly and the bridge is not deployed — the worker handler that
+      # consumes the event is the same code either way.
+      MINIO_NOTIFY_WEBHOOK_ENABLE_PRIMARY: "on"
+      MINIO_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY: ${INGEST_WEBHOOK_ENDPOINT:-http://host.docker.internal:8000/internal/storage-events}
+      MINIO_NOTIFY_WEBHOOK_AUTH_TOKEN_PRIMARY: ${INGEST_WEBHOOK_TOKEN:-local-ingest-token}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "9000:9000" # S3 API
       - "9001:9001" # web console

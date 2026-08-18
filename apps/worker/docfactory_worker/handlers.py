@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from docfactory_core.backpressure import admits, in_flight
 from docfactory_core.budget import (
     Reservation,
     budget_state,
@@ -46,6 +47,7 @@ from docfactory_core.extraction import (
     build_user_message,
     run_extraction,
 )
+from docfactory_core.ingest import ingest_object, parse_s3_events, route_key
 from docfactory_core.llm import get_llm_client
 from docfactory_core.metering import PURPOSE_ESCALATION, PURPOSE_EXTRACT, record_usage
 from docfactory_core.models import Document, DocumentStatus, Extraction, ExtractionField
@@ -97,12 +99,43 @@ def tenant_scoped(handler):
     return wrapper
 
 
+def handle_ingest(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
+    """A document dropped into a tenant's storage prefix.
+
+    The message is an S3-shaped object-created event, so this handler is the
+    same code on AWS (S3 -> SQS) as it is locally (MinIO -> webhook bridge ->
+    queue). It converges on the API upload path immediately: same row, same
+    parse stage, same (tenant, sha256) dedupe.
+    """
+    store, broker = _clients()
+    with tracer.start_as_current_span(
+        "document.ingest", context=extract_trace_context(payload)
+    ) as span:
+        span.set_attribute("openinference.span.kind", "CHAIN")
+        refs = parse_s3_events(payload)
+        span.set_attribute("ingest.records", len(refs))
+        for ref in refs:
+            tenant_id, _ = route_key(ref.key)
+            if tenant_id is None:
+                span.set_attribute("ingest.skipped", "not-an-ingest-key")
+                continue
+            with tenant_context(tenant_id):
+                result = ingest_object(ref, store, broker)
+            span.set_attribute("tenant_id", tenant_id)
+            span.set_attribute("ingest.duplicate", result.duplicate)
+            if result.skipped:
+                span.set_attribute("ingest.skipped", result.skipped)
+
+
 @tenant_scoped
 def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
     tenant_id = current_tenant.get()
     store, broker = _clients()
     settings = get_settings()
+
+    if _defer_if_saturated(payload, settings.parse_queue, tenant_id, document_id):
+        return
 
     with tracer.start_as_current_span(
         "document.parse", context=extract_trace_context(payload)
@@ -161,6 +194,11 @@ def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool =
 def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
     store, _ = _clients()
+
+    if _defer_if_saturated(
+        payload, get_settings().extract_queue, current_tenant.get(), document_id
+    ):
+        return
 
     with tracer.start_as_current_span(
         "document.extract", context=extract_trace_context(payload)
@@ -416,6 +454,32 @@ def _assess(outcome: ExtractionOutcome, text: str, definition: PipelineDefinitio
         route_span.set_attribute("routing.flagged_fields", list(routing.flagged_fields))
 
     return validation, confidence, routing
+
+
+def _defer_if_saturated(payload: dict, queue: str, tenant_id: str, document_id: uuid.UUID) -> bool:
+    """Put the message back if this tenant already fills its share of the pipeline.
+
+    Fairness, not throttling: the message returns to the queue with a short
+    delay and the worker moves straight on to whatever is next, which is how a
+    second tenant's single document gets served while the first is mid-flood.
+    Deferral is not failure — the message is re-sent rather than left to
+    redeliver, so it never counts against the redrive policy and can never
+    reach the DLQ for being busy.
+    """
+    if admits(tenant_id, exclude_document=str(document_id)):
+        return False
+    _, broker = _clients()
+    broker.send(queue, payload, delay_seconds=get_settings().defer_seconds)
+    log.info(
+        "deferred: tenant at its in-flight ceiling",
+        extra={
+            "tenant_id": tenant_id,
+            "queue": queue,
+            "in_flight": in_flight(tenant_id),
+            "limit": get_settings().max_in_flight_per_tenant,
+        },
+    )
+    return True
 
 
 def _pause_on_budget(document_id: uuid.UUID, tenant_id: str, span) -> None:
