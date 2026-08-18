@@ -42,7 +42,8 @@ from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
-from docfactory_core.confidence import RULE_FIELDS, score_extraction
+from docfactory_core.confidence import score_extraction
+from docfactory_core.confidence_model import FEATURES, features_for
 from docfactory_core.config import get_settings
 from docfactory_core.corruption import plan_corruption
 from docfactory_core.db import session_scope, tenant_context
@@ -50,7 +51,8 @@ from docfactory_core.extraction import run_extraction
 from docfactory_core.llm import get_llm_client
 from docfactory_core.models import Document, DocumentStatus, Extraction
 from docfactory_core.parsing import extract_pdf_text
-from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
+from docfactory_core.pipeline_registry import default_pipeline
+from docfactory_core.schemas import Invoice
 from docfactory_core.validation import validate_invoice
 from sqlalchemy import delete, select
 
@@ -68,28 +70,15 @@ DOCS_DIR = REPO_ROOT / "docs"
 # Namespace so a document's row id is stable across rebuilds.
 _CALIB_NS = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 
-FIELDS = (*SCALAR_FIELD_NAMES, "line_items")
+# Which fields exist comes from the pipeline definition, not from a
+# hardcoded invoice list.
+FIELDS = default_pipeline().scored_fields
 
 # Feature names in fitted-weight order. Kept small and individually meaningful
 # so the saved config can be read and argued with, not just applied.
-FEATURES = (
-    "implicating_rules_failed",  # how many failed rules touch this field
-    "log_residual_magnitude",  # size of the worst arithmetic disagreement
-    "groundedness",  # traceability to source text (1.0 when N/A)
-    "shape_suspect",  # fragmented/truncated/implausible value
-    "row_arithmetic_broken",  # a line row where qty x price != amount
-    "needed_retry",  # extraction took a second attempt
-    "date_corroboration",  # does this date appear on the page (2.3a)
-)
-
-
-# Each arithmetic rule has its own residual, so a field is scored by the
-# disagreement that actually implicates it rather than the loudest one anywhere.
-_RULE_RESIDUAL = {
-    "line_items_sum_to_subtotal": "residual.line_items_vs_subtotal",
-    "subtotal_plus_tax_equals_total": "residual.subtotal_plus_tax_vs_total",
-    "tax_matches_rate": "residual.tax_vs_rate",
-}
+# FEATURES and the feature extractor live in core and are imported above:
+# fitting and serving must produce identical vectors, so there is exactly one
+# implementation. A second copy here is the classic train/serve skew bug.
 
 
 @dataclass
@@ -211,54 +200,6 @@ def build_dataset(limit: int | None = None) -> int:
 # --------------------------------------------------------------------------
 
 
-def _features_for(field: str, signals: dict) -> list[float]:
-    failed = [
-        rule.removeprefix("rule.")
-        for rule, passed in signals.items()
-        if rule.startswith("rule.") and passed is False
-    ]
-    implicating = [rule for rule in failed if field in RULE_FIELDS.get(rule, ())]
-
-    residual = 0.0
-    scale = max(abs(float(signals.get("total") or 1.0)), 1.0)
-    for rule in implicating:
-        key = _RULE_RESIDUAL.get(rule)
-        if key:
-            residual = max(residual, abs(float(signals.get(key) or 0.0)))
-    grounded = float(signals.get(f"groundedness.{field}", 1.0))
-    if field == "line_items":
-        grounded = float(signals.get("groundedness.line_items_min", 1.0))
-
-    shape = 0.0
-    if field == "vendor" and signals.get("vendor.looks_fragmented"):
-        shape = 1.0
-    if field == "total" and signals.get("nonpositive_total"):
-        shape = 1.0
-
-    rows_broken = (
-        1.0 if (field == "line_items" and signals.get("line_items.inconsistent_rows")) else 0.0
-    )
-
-    # Dates carry their own corroboration; other fields have no opinion, so
-    # they take 1.0 and the weight simply does not act on them.
-    if field in ("invoice_date", "due_date"):
-        date_score = float(signals.get(f"date_corroboration.{field}", 1.0))
-        term = signals.get("date_corroboration.payment_term")
-        if term is not None:
-            date_score = min(date_score, float(term))
-    else:
-        date_score = 1.0
-    return [
-        float(len(implicating)),
-        float(np.log1p(residual / scale)),
-        grounded,
-        shape,
-        rows_broken,
-        1.0 if float(signals.get("attempts", 1)) > 1 else 0.0,
-        date_score,
-    ]
-
-
 def load_rows() -> list[Row]:
     """Read stored signal vectors from Postgres and label them offline."""
     records = {r["doc_id"]: r for r in _records()}
@@ -293,7 +234,7 @@ def load_rows() -> list[Row]:
                         layout=record["layout"],
                         field=field,
                         error_class=error_classes.get(doc_id, "unknown"),
-                        features=_features_for(field, extraction.confidence_signals),
+                        features=features_for(field, extraction.confidence_signals),
                         correct=int(correctness.get(field, True)),
                     )
                 )

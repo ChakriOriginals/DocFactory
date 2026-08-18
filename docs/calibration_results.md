@@ -1,6 +1,6 @@
 # Confidence calibration study
 
-Fitted 2026-08-18 · git `fb07f68` · dataset built 2026-08-18T01:51:46+00:00 from 345 documents · provider `mock` · corruption rate 0.35 (seed 1337)
+Fitted 2026-08-18 · git `4e11efd` · dataset built 2026-08-18T02:35:28+00:00 from 345 documents · provider `mock` · corruption rate 0.35 (seed 1337)
 
 Unit of analysis is the **field**: the decision being calibrated is whether one
 cell can be accepted without a human looking at it. Weights are fitted on the

@@ -35,6 +35,8 @@ from docfactory_core.extraction import ExtractionOutcome, run_extraction
 from docfactory_core.llm import get_llm_client
 from docfactory_core.models import Document, DocumentStatus, Extraction, ExtractionField
 from docfactory_core.parsing import extract_pdf_text
+from docfactory_core.pipeline import PipelineDefinition
+from docfactory_core.pipeline_registry import default_pipeline
 from docfactory_core.queues import QueueBroker
 from docfactory_core.review import ensure_review_task
 from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
@@ -138,6 +140,10 @@ def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool =
 @tenant_scoped
 def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
+    # The pipeline definition decides the schema, the rules, and which signals
+    # apply to which field. A message may name one; otherwise the tenant's
+    # default applies.
+    definition = default_pipeline()
     store, _ = _clients()
 
     with tracer.start_as_current_span(
@@ -217,6 +223,7 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
                 validation,
                 attempts=outcome.attempts,
                 source_text=text,
+                definition=definition,
             )
             score_span.set_attribute("confidence.doc", confidence.doc_confidence)
             score_span.set_attribute("confidence.reasons", list(confidence.reasons))
@@ -230,14 +237,21 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
         # config file, never from code (2.3b).
         with tracer.start_as_current_span("extraction.route") as route_span:
             route_span.set_attribute("openinference.span.kind", "CHAIN")
-            routing = route_extraction(confidence.signals, get_confidence_model())
+            routing = route_extraction(confidence.signals, get_confidence_model(), definition)
             route_span.set_attribute("routing.decision", routing.decision)
             route_span.set_attribute("routing.threshold", routing.threshold)
             route_span.set_attribute("routing.model_version", routing.model_version)
             route_span.set_attribute("routing.flagged_fields", list(routing.flagged_fields))
 
         _store_extraction(
-            document_id, tenant_id, outcome, outcome.invoice, validation, confidence, routing
+            document_id,
+            tenant_id,
+            outcome,
+            outcome.invoice,
+            validation,
+            confidence,
+            routing,
+            definition,
         )
         span.set_attribute("outcome", routing.decision)
         span.set_attribute("validation.passed", all(validation.values()))
@@ -264,7 +278,9 @@ def _store_extraction(
     validation: dict[str, bool] | None,
     confidence: ConfidenceReport,
     routing: RoutingDecision | None = None,
+    definition: PipelineDefinition | None = None,
 ) -> None:
+    definition = definition or default_pipeline()
     queued_for_review: uuid.UUID | None = None
     flagged: tuple[str, ...] = ()
     with session_scope() as session:
@@ -280,6 +296,8 @@ def _store_extraction(
             doc_confidence=routing.doc_confidence if routing else confidence.doc_confidence,
             routing_decision=routing.decision if routing else None,
             confidence_model_version=routing.model_version if routing else None,
+            pipeline_slug=definition.slug,
+            pipeline_version=definition.version,
             confidence_signals=confidence.signals,
             prompt_tokens=outcome.input_tokens,
             completion_tokens=outcome.output_tokens,

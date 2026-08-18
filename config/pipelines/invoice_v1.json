@@ -1,0 +1,174 @@
+{
+  "document_type": "invoice",
+  "fields": {
+    "vendor": {
+      "kind": "text"
+    },
+    "invoice_number": {
+      "kind": "text"
+    },
+    "invoice_date": {
+      "kind": "date"
+    },
+    "due_date": {
+      "kind": "date"
+    },
+    "currency": {
+      "kind": "enum",
+      "values": [
+        "USD",
+        "EUR"
+      ]
+    },
+    "subtotal": {
+      "kind": "money"
+    },
+    "tax_rate": {
+      "kind": "rate"
+    },
+    "tax": {
+      "kind": "money"
+    },
+    "total": {
+      "kind": "money"
+    },
+    "line_items": {
+      "kind": "table",
+      "item_fields": {
+        "description": {
+          "kind": "text"
+        },
+        "quantity": {
+          "kind": "quantity"
+        },
+        "unit_price": {
+          "kind": "money"
+        },
+        "amount": {
+          "kind": "money"
+        }
+      }
+    }
+  },
+  "validation_rules": [
+    {
+      "name": "line_items_sum_to_subtotal",
+      "type": "sum_equals",
+      "fields": [
+        "subtotal",
+        "line_items"
+      ],
+      "items": "line_items",
+      "item_field": "amount",
+      "target": "subtotal"
+    },
+    {
+      "name": "subtotal_plus_tax_equals_total",
+      "type": "terms_equal",
+      "fields": [
+        "subtotal",
+        "tax",
+        "total"
+      ],
+      "terms": [
+        "subtotal",
+        "tax"
+      ],
+      "target": "total"
+    },
+    {
+      "name": "tax_matches_rate",
+      "type": "product_equals",
+      "fields": [
+        "subtotal",
+        "tax_rate",
+        "tax"
+      ],
+      "factors": [
+        "subtotal",
+        "tax_rate"
+      ],
+      "result": "tax",
+      "tolerance": "0.02"
+    },
+    {
+      "name": "due_date_not_before_invoice_date",
+      "type": "date_order",
+      "fields": [
+        "due_date",
+        "invoice_date"
+      ],
+      "earlier": "invoice_date",
+      "later": "due_date"
+    },
+    {
+      "name": "row_arithmetic",
+      "type": "product_equals",
+      "fields": [
+        "line_items"
+      ],
+      "items": "line_items",
+      "factors": [
+        "quantity",
+        "unit_price"
+      ],
+      "result": "amount"
+    }
+  ],
+  "extraction_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "vendor",
+      "invoice_number",
+      "invoice_date",
+      "due_date",
+      "currency",
+      "subtotal",
+      "tax_rate",
+      "tax",
+      "total",
+      "line_items"
+    ],
+    "properties": {
+      "vendor": {
+        "type": "string"
+      },
+      "invoice_number": {
+        "type": "string"
+      },
+      "invoice_date": {
+        "type": "string"
+      },
+      "due_date": {
+        "type": "string"
+      },
+      "currency": {
+        "type": "string",
+        "enum": [
+          "USD",
+          "EUR"
+        ]
+      },
+      "subtotal": {
+        "type": "string"
+      },
+      "tax_rate": {
+        "type": "string"
+      },
+      "tax": {
+        "type": "string"
+      },
+      "total": {
+        "type": "string"
+      },
+      "line_items": {
+        "type": "array",
+        "items": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "sla_hours": 24
+}

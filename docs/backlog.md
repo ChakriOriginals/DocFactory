@@ -44,6 +44,27 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **No CI workflow yet.** `make test` and `make lint` are CI-ready and green;
   wiring GitHub Actions is a later phase.
 
+## From Phase 3b
+
+- **No pipeline management API yet.** Definitions are seeded by migration and
+  loaded from `config/pipelines/*.json`. `parse_definition` is the validation
+  boundary and is tested as such, but the POST/PUT endpoints that would let a
+  tenant author one, and the version-bump-on-edit behaviour, are not built.
+- **Extraction still constructs a Pydantic `Invoice`.** The scorer, rules and
+  normalization are fully pipeline-driven, but `run_extraction` validates
+  against the hardcoded `Invoice` model rather than building one from the
+  pipeline's JSON Schema. A second document type needs that last step —
+  either `pydantic.create_model` from the schema, or validating the record as
+  a dict against the schema directly.
+- **`schemas.py` still holds invoice constants.** `INVOICE_JSON_SCHEMA` and
+  `SCALAR_FIELD_NAMES` are now duplicated by the pipeline definition; the
+  definition is authoritative and these should be deleted once extraction is
+  schema-driven.
+- **Rule vocabulary is small on purpose.** `sum_equals`, `terms_equal`,
+  `product_equals`, `date_order`, `regex`, `required`. Adding a rule type is a
+  code change by design — arbitrary tenant-supplied predicates would be
+  remote code execution.
+
 ## From Phase 3a
 
 - **The app DB role is created by a migration.** Roles are cluster-level, not

@@ -26,9 +26,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from docfactory_core.confidence import RULE_FIELDS
 from docfactory_core.config import get_settings
-from docfactory_core.schemas import SCALAR_FIELD_NAMES
+from docfactory_core.pipeline import PipelineDefinition
 
 # Feature names in fitted-weight order. Small and individually meaningful so a
 # saved config can be read and argued with rather than merely applied.
@@ -42,55 +41,51 @@ FEATURES = (
     "date_corroboration",  # does this date appear on the page (2.3a)
 )
 
-SCORED_FIELDS = (*SCALAR_FIELD_NAMES, "line_items")
 
-# Each arithmetic rule has its own residual, so a field is scored by the
-# disagreement that actually implicates it rather than the loudest anywhere.
-_RULE_RESIDUAL = {
-    "line_items_sum_to_subtotal": "residual.line_items_vs_subtotal",
-    "subtotal_plus_tax_equals_total": "residual.subtotal_plus_tax_vs_total",
-    "tax_matches_rate": "residual.tax_vs_rate",
-}
+def _default_definition() -> PipelineDefinition:
+    from docfactory_core.pipeline_registry import default_pipeline
 
-_DATE_FIELDS = ("invoice_date", "due_date")
+    return default_pipeline()
 
 
-def features_for(field: str, signals: dict) -> list[float]:
+def features_for(
+    field: str, signals: dict, definition: PipelineDefinition | None = None
+) -> list[float]:
     """Feature vector for one field of one extraction.
 
     Shared by the calibration fit and the pipeline — see the module docstring.
+    Which signals apply to which field comes from the pipeline's declared field
+    kinds, not from knowledge of any particular document type.
     """
+    definition = definition or _default_definition()
+    rule_fields = definition.rule_fields
     failed = [
         key.removeprefix("rule.")
         for key, passed in signals.items()
         if key.startswith("rule.") and passed is False
     ]
-    implicating = [rule for rule in failed if field in RULE_FIELDS.get(rule, ())]
+    implicating = [rule for rule in failed if field in rule_fields.get(rule, ())]
 
     residual = 0.0
-    scale = max(abs(float(signals.get("total") or 1.0)), 1.0)
+    scale = max(abs(float(signals.get("scale") or signals.get("total") or 1.0)), 1.0)
     for rule in implicating:
-        key = _RULE_RESIDUAL.get(rule)
-        if key:
-            residual = max(residual, abs(float(signals.get(key) or 0.0)))
+        residual = max(residual, abs(float(signals.get(f"residual.{rule}") or 0.0)))
 
     grounded = float(signals.get(f"groundedness.{field}", 1.0))
-    if field == "line_items":
-        grounded = float(signals.get("groundedness.line_items_min", 1.0))
+    if field in definition.table_fields:
+        grounded = float(signals.get(f"groundedness.{field}_min", 1.0))
 
     shape = 0.0
-    if field == "vendor" and signals.get("vendor.looks_fragmented"):
+    if signals.get(f"{field}.looks_fragmented"):
         shape = 1.0
     if field == "total" and signals.get("nonpositive_total"):
         shape = 1.0
 
-    rows_broken = (
-        1.0 if (field == "line_items" and signals.get("line_items.inconsistent_rows")) else 0.0
-    )
+    rows_broken = 1.0 if signals.get(f"{field}.inconsistent_rows") else 0.0
 
     # Dates carry their own corroboration; other fields have no opinion and
     # take 1.0, so the weight simply does not act on them.
-    if field in _DATE_FIELDS:
+    if field in definition.date_fields:
         date_score = float(signals.get(f"date_corroboration.{field}", 1.0))
         term = signals.get("date_corroboration.payment_term")
         if term is not None:
@@ -161,10 +156,14 @@ class RoutingDecision:
     threshold: float
 
 
-def route_extraction(signals: dict, model: ConfidenceModel) -> RoutingDecision:
+def route_extraction(
+    signals: dict, model: ConfidenceModel, definition: PipelineDefinition | None = None
+) -> RoutingDecision:
     """Score every field and decide whether the document can skip review."""
+    definition = definition or _default_definition()
     field_confidence = {
-        field: model.probability(features_for(field, signals)) for field in SCORED_FIELDS
+        field: model.probability(features_for(field, signals, definition))
+        for field in definition.scored_fields
     }
     flagged = tuple(field for field, score in field_confidence.items() if score < model.threshold)
     return RoutingDecision(

@@ -39,7 +39,8 @@ from docfactory_core.date_corroboration import (
     stated_payment_term,
 )
 from docfactory_core.groundedness import GROUNDEDNESS_THRESHOLD, groundedness
-from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
+from docfactory_core.pipeline import PipelineDefinition
+from docfactory_core.schemas import Invoice
 
 # --- Uncalibrated penalty priors (see note 3 above) -------------------------
 
@@ -64,23 +65,15 @@ PENALTY_UNCORROBORATED_DATE = 0.35
 # calibration can loosen it rather than requiring a code change.
 DATE_CORROBORATION_THRESHOLD = 0.9
 
-# String fields checked against the source text. Money and dates are omitted:
-# they are already constrained by the arithmetic rules, and their canonical
-# form ("25832.09") deliberately differs from the printed form ("25.832,09 €"),
-# so a text search would report a false negative on a correct extraction.
-GROUNDED_FIELDS = ("vendor", "invoice_number")
+# Which fields get which signals is no longer knowledge this module holds: the
+# pipeline definition declares each field's kind, and text/date/table views are
+# derived from that. Groundedness applies to free text only — money and dates
+# are already constrained by rules, and their canonical form ("25832.09")
+# deliberately differs from the printed form ("25.832,09 €"), so a text search
+# would report a false negative on a correct extraction.
 
-# Which fields each validation rule implicates. Failing the rule lowers
-# confidence for exactly these fields.
-RULE_FIELDS: dict[str, tuple[str, ...]] = {
-    "line_items_sum_to_subtotal": ("subtotal", "line_items"),
-    "subtotal_plus_tax_equals_total": ("subtotal", "tax", "total"),
-    "tax_matches_rate": ("subtotal", "tax_rate", "tax"),
-    "invoice_date_parses": ("invoice_date",),
-    "due_date_not_before_invoice_date": ("due_date", "invoice_date"),
-}
-
-_DATE_RULES = frozenset({"invoice_date_parses", "due_date_not_before_invoice_date"})
+# Rule types whose failure is a softer signal than an arithmetic mismatch.
+_SOFT_RULE_TYPES = frozenset({"date_order", "required"})
 
 # Small-caps rendering splits a vendor name into character runs, and the
 # extractor can go wrong in two distinguishable ways. Both are shape defects,
@@ -127,10 +120,11 @@ class ConfidenceReport:
         """
         if name in self.fields:
             return self.fields[name].confidence
-        if name.startswith("line_items"):
-            entry = self.fields.get("line_items")
-            return entry.confidence if entry else None
-        return None
+        # Table cells inherit their parent's score: the rules constrain the
+        # row list as a whole, not individual cells within it.
+        table = name.split(".", 1)[0]
+        entry = self.fields.get(table)
+        return entry.confidence if entry else None
 
 
 def score_extraction(
@@ -139,6 +133,7 @@ def score_extraction(
     *,
     attempts: int = 1,
     source_text: str | None = None,
+    definition: PipelineDefinition | None = None,
 ) -> ConfidenceReport:
     """Score an extraction.
 
@@ -148,10 +143,17 @@ def score_extraction(
     should always pass it. It stays optional so the arithmetic signals can be
     scored standalone.
     """
+    if definition is None:
+        from docfactory_core.pipeline_registry import default_pipeline
+
+        definition = default_pipeline()
+    rule_fields = definition.rule_fields
+    soft_rules = {rule.name for rule in definition.rules if rule.type in _SOFT_RULE_TYPES}
+
     signals: dict[str, object] = {"attempts": attempts}
     doc_penalty = 0.0
     doc_reasons: list[str] = []
-    field_penalties: dict[str, float] = dict.fromkeys((*SCALAR_FIELD_NAMES, "line_items"), 0.0)
+    field_penalties: dict[str, float] = dict.fromkeys(definition.scored_fields, 0.0)
     field_reasons: dict[str, list[str]] = {name: [] for name in field_penalties}
 
     # --- validation rules -> document and field penalties ---
@@ -159,24 +161,29 @@ def score_extraction(
         signals[f"rule.{rule}"] = passed
         if passed:
             continue
-        weight = PENALTY_DATE_RULE if rule in _DATE_RULES else PENALTY_ARITHMETIC_RULE
+        weight = PENALTY_DATE_RULE if rule in soft_rules else PENALTY_ARITHMETIC_RULE
         doc_penalty += weight
         doc_reasons.append(f"failed:{rule}")
-        for name in RULE_FIELDS.get(rule, ()):
+        for name in rule_fields.get(rule, ()):
             if name in field_penalties:
                 field_penalties[name] += weight
                 field_reasons[name].append(f"failed:{rule}")
 
     # --- residual magnitudes: how badly, not just whether ---
-    line_sum = sum((item.amount for item in invoice.line_items), Decimal("0"))
-    signals["residual.line_items_vs_subtotal"] = _as_float(line_sum - invoice.subtotal)
-    signals["residual.subtotal_plus_tax_vs_total"] = _as_float(
-        invoice.subtotal + invoice.tax - invoice.total
-    )
-    signals["residual.tax_vs_rate"] = _as_float(invoice.subtotal * invoice.tax_rate - invoice.tax)
-    signals["residual.due_minus_invoice_days"] = (invoice.due_date - invoice.invoice_date).days
-    signals["line_item_count"] = len(invoice.line_items)
-    signals["total"] = _as_float(invoice.total)
+    from docfactory_core.pipeline import residuals as _residuals
+
+    record = invoice.model_dump() if hasattr(invoice, "model_dump") else dict(invoice)
+    for rule_name, value in _residuals(record, definition).items():
+        signals[f"residual.{rule_name}"] = value
+    for table in definition.table_fields:
+        signals[f"{table}.count"] = len(getattr(invoice, table, None) or [])
+    # Scale for relative residuals: the largest money field present.
+    money_values = [
+        abs(_as_float(getattr(invoice, name)))
+        for name, spec in definition.fields.items()
+        if spec.kind.value == "money" and getattr(invoice, name, None) is not None
+    ]
+    signals["scale"] = max(money_values) if money_values else 1.0
 
     # --- extraction-process signals ---
     if attempts > 1:
@@ -184,14 +191,18 @@ def score_extraction(
         doc_reasons.append("needed_schema_retry")
 
     # --- per-field shape heuristics ---
-    fragmented = looks_fragmented(invoice.vendor)
-    signals["vendor.looks_fragmented"] = fragmented
-    signals["vendor.token_count"] = len(invoice.vendor.split())
-    if fragmented:
-        doc_penalty += PENALTY_VENDOR_FRAGMENTED
-        doc_reasons.append("vendor_looks_fragmented")
-        field_penalties["vendor"] += PENALTY_SUSPECT_FIELD_SHAPE
-        field_reasons["vendor"].append("looks_fragmented")
+    # Shape heuristics apply to every free-text field the pipeline declares,
+    # not to a field named "vendor".
+    for name in definition.text_fields:
+        value = str(getattr(invoice, name, "") or "")
+        fragmented = looks_fragmented(value)
+        signals[f"{name}.looks_fragmented"] = fragmented
+        signals[f"{name}.token_count"] = len(value.split())
+        if fragmented:
+            doc_penalty += PENALTY_VENDOR_FRAGMENTED
+            doc_reasons.append(f"{name}_looks_fragmented")
+            field_penalties[name] += PENALTY_SUSPECT_FIELD_SHAPE
+            field_reasons[name].append("looks_fragmented")
 
     nonpositive_total = invoice.total <= 0
     signals["nonpositive_total"] = nonpositive_total
@@ -201,27 +212,24 @@ def score_extraction(
         field_penalties["total"] += PENALTY_SUSPECT_FIELD_SHAPE
         field_reasons["total"].append("nonpositive")
 
-    for name in ("vendor", "invoice_number"):
-        if len(getattr(invoice, name).strip()) < 2:
+    for name in definition.text_fields:
+        if len(str(getattr(invoice, name, "") or "").strip()) < 2:
             field_penalties[name] += PENALTY_SUSPECT_FIELD_SHAPE
             field_reasons[name].append("implausibly_short")
             signals[f"{name}.implausibly_short"] = True
 
-    # Descriptions cannot be empty here (the schema enforces min_length=1), so
-    # the reachable per-line signal is arithmetic: which row fails qty x price.
-    inconsistent_lines = [
-        index
-        for index, item in enumerate(invoice.line_items)
-        if abs(item.quantity * item.unit_price - item.amount) > _CENT
-    ]
-    signals["line_items.inconsistent_rows"] = inconsistent_lines
-    if inconsistent_lines:
-        field_penalties["line_items"] += PENALTY_SUSPECT_FIELD_SHAPE
-        field_reasons["line_items"].append(f"row_arithmetic:{inconsistent_lines}")
+    # Per-row arithmetic, from whatever product rules the pipeline declares.
+    from docfactory_core.pipeline import inconsistent_rows as _inconsistent_rows
+
+    for table, bad_rows in _inconsistent_rows(record, definition).items():
+        signals[f"{table}.inconsistent_rows"] = bad_rows
+        if bad_rows:
+            field_penalties[table] += PENALTY_SUSPECT_FIELD_SHAPE
+            field_reasons[table].append(f"row_arithmetic:{bad_rows}")
 
     # --- groundedness: the only guard on unconstrained free text ---
     if source_text is not None:
-        for name in GROUNDED_FIELDS:
+        for name in definition.text_fields:
             score = groundedness(getattr(invoice, name), source_text)
             signals[f"groundedness.{name}"] = score
             if score < GROUNDEDNESS_THRESHOLD:
@@ -246,7 +254,7 @@ def score_extraction(
     if source_text is not None:
         text_dates = dates_in_text(source_text)
         signals["date_corroboration.text_dates_found"] = len(text_dates)
-        for name in ("invoice_date", "due_date"):
+        for name in definition.date_fields:
             score = corroborate_date(getattr(invoice, name), text_dates)
             signals[f"date_corroboration.{name}"] = score
             if score < DATE_CORROBORATION_THRESHOLD:
@@ -262,7 +270,7 @@ def score_extraction(
             doc_penalty += PENALTY_UNCORROBORATED_DATE
             doc_reasons.append("payment_term_mismatch")
             # The stated term pins the interval but not which end moved.
-            for name in ("invoice_date", "due_date"):
+            for name in definition.date_fields:
                 field_penalties[name] += PENALTY_UNCORROBORATED_DATE / 2
                 field_reasons[name].append(f"term_mismatch:{term_score}")
 

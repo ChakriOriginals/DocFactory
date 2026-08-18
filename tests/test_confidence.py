@@ -11,11 +11,11 @@ from decimal import Decimal
 
 import pytest
 from docfactory_core.confidence import (
-    RULE_FIELDS,
     failed_extraction_report,
     looks_fragmented,
     score_extraction,
 )
+from docfactory_core.pipeline_registry import default_pipeline
 from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
 from docfactory_core.validation import validate_invoice
 
@@ -74,7 +74,7 @@ def test_broken_totals_lower_document_confidence():
 def test_failed_rule_penalizes_only_the_fields_it_implicates():
     # subtotal + tax != total implicates subtotal, tax, total — not the dates.
     report = score(make_invoice(total="9999.00"))
-    implicated = RULE_FIELDS["subtotal_plus_tax_equals_total"]
+    implicated = default_pipeline().rule_fields["subtotal_plus_tax_equals_total"]
     for name in implicated:
         assert report.fields[name].confidence < 1.0, name
     for name in ("invoice_date", "due_date", "currency", "invoice_number"):
@@ -125,16 +125,16 @@ def test_signals_carry_residual_magnitudes_not_just_booleans():
     report = score(make_invoice(total="1200.00"))
     assert report.signals["rule.subtotal_plus_tax_equals_total"] is False
     # 1000 + 75 - 1200 = -125
-    assert report.signals["residual.subtotal_plus_tax_vs_total"] == pytest.approx(-125.0)
-    assert report.signals["line_item_count"] == 2
+    assert report.signals["residual.subtotal_plus_tax_equals_total"] == pytest.approx(-125.0)
+    assert report.signals["line_items.count"] == 2
     assert report.signals["attempts"] == 1
 
 
 def test_near_miss_and_wild_miss_are_distinguishable_in_signals():
     near = score(make_invoice(total="1075.50"))
     wild = score(make_invoice(total="99999.00"))
-    assert abs(near.signals["residual.subtotal_plus_tax_vs_total"]) < abs(
-        wild.signals["residual.subtotal_plus_tax_vs_total"]
+    assert abs(near.signals["residual.subtotal_plus_tax_equals_total"]) < abs(
+        wild.signals["residual.subtotal_plus_tax_equals_total"]
     )
 
 
@@ -235,7 +235,7 @@ def test_decimal_precision_is_preserved_in_residuals():
     report = score(invoice)
     # 1000 * 0.075 = 75.00 vs 75.01 -> within tolerance, rule still passes
     assert report.signals["rule.tax_matches_rate"] is True
-    assert report.signals["residual.tax_vs_rate"] == pytest.approx(float(Decimal("-0.01")))
+    assert report.signals["residual.tax_matches_rate"] == pytest.approx(float(Decimal("-0.01")))
 
 
 class TestTruncatedVendorDetection:

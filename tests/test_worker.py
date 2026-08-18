@@ -211,7 +211,7 @@ def test_confidence_is_persisted_end_to_end(stack):
         assert signals["attempts"] == 1
         assert signals["rule.subtotal_plus_tax_equals_total"] is True
         # residual magnitudes are stored, not just the booleans
-        assert "residual.subtotal_plus_tax_vs_total" in signals
+        assert "residual.subtotal_plus_tax_equals_total" in signals
         assert signals["vendor.looks_fragmented"] is False
 
         scored = {f.name: f.confidence for f in extraction.fields}

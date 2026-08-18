@@ -142,6 +142,31 @@ class ApiKey(ColumnsMixin, Base):
     )
 
 
+class Pipeline(ColumnsMixin, Base):
+    """A tenant's document-processing definition, versioned.
+
+    Editing a pipeline creates a new version rather than mutating the current
+    one, so documents in flight keep the definition they started under and an
+    extraction can always be explained by the config that produced it.
+    """
+
+    __tablename__ = "pipelines"
+
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    document_type: Mapped[str] = mapped_column(Text, nullable=False)
+    config: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slug", "version", name="uq_pipelines_tenant_slug_version"),
+        Index("ix_pipelines_tenant_active", "tenant_id", "slug", "is_active"),
+    )
+
+
 class Document(ColumnsMixin, Base):
     __tablename__ = "documents"
 
@@ -199,6 +224,10 @@ class Extraction(ColumnsMixin, Base):
     # weights that approved it.
     routing_decision: Mapped[str | None] = mapped_column(String(32))
     confidence_model_version: Mapped[int | None] = mapped_column(Integer)
+    # Which pipeline definition produced this, mirroring the model-version
+    # discipline: an extraction can always be explained by its config.
+    pipeline_slug: Mapped[str | None] = mapped_column(Text)
+    pipeline_version: Mapped[int | None] = mapped_column(Integer)
     # Raw scorer inputs (rule outcomes, residual magnitudes, shape flags).
     # Persisted so confidence weights can be refit offline against the golden
     # set without reprocessing documents — see confidence.py.
