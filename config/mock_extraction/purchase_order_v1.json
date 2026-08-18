@@ -1,0 +1,48 @@
+{
+  "currency_fields": ["currency"],
+  "id_fields": {
+    "po_number": "PO-\\d{4}-\\d{5}|BA-\\d{4}/\\d{4}"
+  },
+  "heading_fields": {
+    "buyer": {
+      "title_words": ["PURCHASEORDER", "BESTELLUNG"],
+      "skip_prefixes": [
+        "purchase order", "order date", "delivery", "vendor", "ship to",
+        "bestellung", "bestelldatum", "lieferant", "lieferung", "lieferadresse",
+        "pos.", "beschreibung", "description", "qty", "menge", "ust-idnr"
+      ]
+    }
+  },
+  "labeled_fields": {
+    "vendor": {
+      "labels": ["Vendor:", "Lieferant:"]
+    }
+  },
+  "date_fields": ["order_date", "delivery_date"],
+  "table": {
+    "field": "line_items",
+    "headers": ["QTY ITEM", "Pos. Beschreibung"],
+    "stop_keys": ["Subtotal", "Zwischensumme"],
+    "columns": {
+      "description": "description",
+      "quantity": "quantity",
+      "unit_price": "unit_price",
+      "amount": "amount"
+    },
+    "empty_row": {
+      "description": "unknown",
+      "quantity": "1",
+      "unit_price": "0",
+      "amount": "0"
+    }
+  },
+  "labeled_amounts": {
+    "subtotal": ["Subtotal", "Zwischensumme"],
+    "shipping": ["Freight", "Versandkosten"],
+    "total": ["Order Total", "Gesamtbetrag"]
+  },
+  "amount_fallbacks": {
+    "subtotal": "sum:amount",
+    "total": "field:subtotal"
+  }
+}

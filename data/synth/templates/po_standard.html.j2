@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: Letter; margin: 16mm 15mm; }
+  body { font-family: "Helvetica Neue", Arial, sans-serif; font-size: 9.5pt; color: #1b1b1b; }
+  .buyer .name { font-size: 15pt; font-weight: 700; letter-spacing: 0.3px; }
+  .buyer .addr { font-size: 8.5pt; color: #555; line-height: 1.45; margin-top: 3px; }
+  .kind { margin-top: 7mm; padding: 3mm 0; border-top: 2.5px solid #1f3b73;
+          border-bottom: 2.5px solid #1f3b73; }
+  .kind .word { font-size: 15pt; font-weight: 700; letter-spacing: 5px; color: #1f3b73; }
+  .meta { margin-top: 5mm; font-size: 9.5pt; line-height: 1.7; }
+  .meta .k { display: inline-block; width: 34mm; font-size: 7.5pt; letter-spacing: 1.2px;
+             color: #6b7280; }
+  .party { margin-top: 5mm; font-size: 9pt; line-height: 1.45; }
+  .party .k { font-size: 7.5pt; letter-spacing: 1.2px; color: #6b7280; }
+  .items { width: 100%; border-collapse: collapse; margin-top: 7mm; }
+  .items th { text-align: left; font-size: 8pt; letter-spacing: 1.2px; color: #fff;
+              background: #1f3b73; padding: 6px 8px; }
+  .items td { padding: 5px 8px; border-bottom: 0.5px solid #d6d9de; }
+  .num { text-align: right; }
+  .totals { border-collapse: collapse; margin-left: auto; margin-top: 5mm; }
+  .totals td { padding: 3px 0 3px 22px; text-align: right; }
+  .totals .k { color: #555; }
+  .totals .grand td { font-weight: 700; font-size: 12pt; color: #1f3b73;
+                      border-top: 1.5px solid #1f3b73; padding-top: 6px; }
+  .footer { margin-top: 12mm; font-size: 8.5pt; color: #555;
+            border-top: 0.5px solid #d6d9de; padding-top: 3mm; }
+</style>
+</head>
+<body>
+  <div class="buyer">
+    <div class="name">{{ po.buyer.name }}</div>
+    <div class="addr">
+      {{ po.buyer.address_lines | join("<br>") | safe }}
+      {% if po.buyer.email %}<br>{{ po.buyer.email }}{% endif %}
+    </div>
+  </div>
+
+  <div class="kind"><span class="word">PURCHASE ORDER</span></div>
+
+  <div class="meta">
+    <div><span class="k">PO NUMBER</span>{{ po.po_number }}</div>
+    <div><span class="k">ORDER DATE</span>{{ po.order_date | date_us }}</div>
+    <div><span class="k">DELIVERY DATE</span>{{ po.delivery_date | date_us }}</div>
+  </div>
+
+  <div class="party">
+    <div class="k">VENDOR</div>
+    Vendor: {{ po.vendor.name }}<br>
+    {{ po.vendor.address_lines | join("<br>") | safe }}
+  </div>
+
+  <div class="party">
+    <div class="k">SHIP TO</div>
+    {{ po.buyer.name }}<br>
+    {{ po.ship_to | join("<br>") | safe }}
+  </div>
+
+  <table class="items">
+    <tr>
+      <th class="num" style="width:8%">QTY</th>
+      <th style="width:56%">ITEM</th>
+      <th class="num" style="width:18%">UNIT PRICE</th>
+      <th class="num" style="width:18%">AMOUNT</th>
+    </tr>
+    {% for item in po.line_items %}
+    <tr>
+      <td class="num">{{ item.quantity }}</td>
+      <td>{{ item.description }}</td>
+      <td class="num">{{ item.unit_price | usd }}</td>
+      <td class="num">{{ item.amount | usd }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <table class="totals">
+    <tr><td class="k">Subtotal</td><td>{{ po.subtotal | usd }}</td></tr>
+    <tr><td class="k">Freight</td><td>{{ po.shipping | usd }}</td></tr>
+    <tr class="grand"><td class="k">Order Total</td><td>{{ po.total | usd }}</td></tr>
+  </table>
+
+  <div class="footer">{{ po.note }}</div>
+</body>
+</html>

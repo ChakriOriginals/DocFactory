@@ -52,7 +52,7 @@ def stack():
     return ObjectStore(), QueueBroker()
 
 
-def _ingest(store, fixture_name: str) -> Document:
+def _ingest(store, fixture_name: str, doc_type: str = "invoice") -> Document:
     """Simulate a completed upload: object in MinIO + document row in received."""
     pdf = (FIXTURES / fixture_name).read_bytes()
     import hashlib
@@ -69,6 +69,7 @@ def _ingest(store, fixture_name: str) -> Document:
         tenant_id=settings.default_tenant_id,
         s3_key=s3_key,
         sha256=sha,
+        doc_type=doc_type,
         status=DocumentStatus.RECEIVED,
     )
     with session_scope() as session:
@@ -270,3 +271,52 @@ def test_routing_sends_a_low_confidence_document_to_review(stack):
         ).first()
         assert extraction.routing_decision == routed.status
         assert extraction.confidence_model_version == get_confidence_model().version
+
+
+def test_a_purchase_order_flows_through_the_same_worker(stack):
+    """The 3c claim, end to end: a second document type through the real stages.
+
+    The handler picks the pipeline from the document's own `doc_type`, so the
+    only thing that makes this a purchase order rather than an invoice is the
+    definition — the parse and extract code paths are the ones the invoice
+    tests above exercise.
+    """
+    from docfactory_worker.handlers import handle_extract, handle_parse
+
+    store, _ = stack
+    document = _ingest(store, "po_standard.pdf", doc_type="purchase_order")
+    payload = {"document_id": str(document.id)}
+
+    handle_parse(payload)
+    assert _status(document.id).status == DocumentStatus.PARSED
+
+    handle_extract(payload)
+    assert _status(document.id).status == DocumentStatus.APPROVED
+
+    with session_scope() as session:
+        extraction = session.scalars(
+            select(Extraction)
+            .where(Extraction.document_id == document.id)
+            .order_by(Extraction.created_at.desc())
+        ).first()
+        assert extraction.pipeline_slug == "purchase_order"
+        assert extraction.pipeline_version == 1
+        assert extraction.validation_passed is True
+        # the purchase order's own rules ran, not the invoice's
+        assert set(extraction.validation) == {
+            "line_items_sum_to_subtotal",
+            "subtotal_plus_shipping_equals_total",
+            "order_date_parses",
+            "delivery_not_before_order_date",
+            "po_number_format",
+        }
+        assert extraction.output["po_number"] == "PO-2026-47563"
+        assert extraction.output["total"] == "102636.52"
+
+        stored = {row.name: row.value for row in extraction.fields}
+        # 9 scalars + line_items.count + 4 rows x 4 cells
+        assert len(stored) == 9 + 1 + 4 * 4
+        assert stored["vendor"] == "Jenkins-Cook"
+        assert stored["shipping"] == "95.00"
+        assert "invoice_number" not in stored
+        assert all(row.confidence is not None for row in extraction.fields)

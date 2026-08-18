@@ -23,7 +23,8 @@ reset: .env
 
 # DYLD_FALLBACK_LIBRARY_PATH lets WeasyPrint find Homebrew's pango on macOS; harmless elsewhere.
 seed: .env
-	DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python data/synth/generate.py --count 500 --upload --previews
+	DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python data/synth/generate.py --type invoice --count 500 --upload --previews
+	DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python data/synth/generate.py --type purchase_order --count 120 --upload --previews
 
 api: .env
 	uv run uvicorn docfactory_api.main:app --port 8000
@@ -51,8 +52,9 @@ calibrate: .env
 calibrate-fit: .env
 	uv run python -m docfactory_evals.calibrate --fit-only
 
-## Field-accuracy eval on the golden set. Uses MODEL_PROVIDER from .env
-## (mock by default). For a real number: MODEL_PROVIDER=anthropic make eval
+## Field-accuracy eval on the golden set, per document type. Uses
+## MODEL_PROVIDER from .env (mock by default). One type: --type purchase_order.
+## For a real number: MODEL_PROVIDER=anthropic make eval
 eval: .env
 	uv run python -m docfactory_evals.run
 

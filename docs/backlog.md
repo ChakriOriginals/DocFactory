@@ -50,20 +50,41 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
   loaded from `config/pipelines/*.json`. `parse_definition` is the validation
   boundary and is tested as such, but the POST/PUT endpoints that would let a
   tenant author one, and the version-bump-on-edit behaviour, are not built.
-- **Extraction still constructs a Pydantic `Invoice`.** The scorer, rules and
-  normalization are fully pipeline-driven, but `run_extraction` validates
-  against the hardcoded `Invoice` model rather than building one from the
-  pipeline's JSON Schema. A second document type needs that last step —
-  either `pydantic.create_model` from the schema, or validating the record as
-  a dict against the schema directly.
-- **`schemas.py` still holds invoice constants.** `INVOICE_JSON_SCHEMA` and
-  `SCALAR_FIELD_NAMES` are now duplicated by the pipeline definition; the
-  definition is authoritative and these should be deleted once extraction is
-  schema-driven.
 - **Rule vocabulary is small on purpose.** `sum_equals`, `terms_equal`,
   `product_equals`, `date_order`, `regex`, `required`. Adding a rule type is a
   code change by design — arbitrary tenant-supplied predicates would be
   remote code execution.
+
+## From Phase 3c
+
+- **The confidence model is fitted on invoices and served to every type.**
+  `PipelineDefinition.confidence_model_path` exists and is parsed, but
+  `get_confidence_model()` still loads the one path in settings. Purchase
+  orders are therefore routed by weights fitted on invoice errors. The
+  features are kind-driven so the vectors are meaningful, but the *calibration*
+  is not this type's. Wiring per-pipeline model paths is a small change; the
+  work is the study that produces a second model.
+- **The corruption/calibration study is invoice-only.** `ERROR_CLASS_FIELDS`
+  names invoice fields (`total`, `vendor`, `invoice_date`), and
+  `make calibrate` reads the invoice labels file. A per-type study needs the
+  error classes expressed against field *kinds* the way the signals now are.
+- **The mock backend needs reading hints per document type.**
+  `config/mock_extraction/<slug>_v<n>.json` tells the mock how a layout prints
+  its fields. That is deliberate — the mock is a stand-in for a model, and a
+  type without hints must run in `anthropic` mode — but it does mean a new
+  type is two config files, not one.
+- **An empty `line_items` list no longer triggers a schema retry.** Pydantic's
+  `min_length=1` is gone and the JSON-Schema equivalent (`minItems`) is
+  outside the structured-outputs subset the schema deliberately stays within.
+  An empty table now fails `line_items_sum_to_subtotal` and routes to review
+  instead of failing the document outright — arguably the better outcome, but
+  it is a behaviour change, recorded here rather than discovered later.
+- **The eval golden set is capped at a third of a corpus.** One generic rule
+  rather than per-type configuration, so the invoice set stays at 100 and the
+  smaller purchase-order corpus yields 40. If a corpus is ever generated much
+  smaller than its golden size, that cap is what will surprise someone.
+- **README still describes Phase 0.** It predates every phase since; the
+  quickstart commands work but the state description does not.
 
 ## From Phase 3a
 

@@ -102,3 +102,57 @@ def test_upload_rejects_empty_file(client):
 def test_get_unknown_document_404s(client):
     response = client.get(f"/documents/{uuid.uuid4()}")
     assert response.status_code == 404
+
+
+class TestDocumentTypeSelectsThePipeline:
+    """`doc_type` names the pipeline definition a document is processed under.
+
+    It is caller-supplied, so it is checked here at the boundary rather than in
+    a worker that would otherwise be holding a document it has no definition
+    for. 3b made a definition untrusted input on write; this is the same
+    standard applied to naming one.
+    """
+
+    def test_an_unknown_type_is_rejected_with_the_available_ones(self, client, unique_pdf_bytes):
+        payload, _ = unique_pdf_bytes
+        response = client.post(
+            "/documents",
+            params={"doc_type": "bill_of_lading"},
+            files={"file": ("thing.pdf", payload, "application/pdf")},
+        )
+        assert response.status_code == 400
+        assert "unknown doc_type" in response.json()["detail"]
+        assert "purchase_order" in response.json()["detail"]
+
+    def test_a_path_traversing_type_is_rejected(self, client, unique_pdf_bytes):
+        payload, _ = unique_pdf_bytes
+        response = client.post(
+            "/documents",
+            params={"doc_type": "../../etc/passwd"},
+            files={"file": ("thing.pdf", payload, "application/pdf")},
+        )
+        assert response.status_code == 400
+
+    def test_a_known_type_is_recorded_on_the_document(self, client, unique_pdf_bytes):
+        payload, created = unique_pdf_bytes
+        response = client.post(
+            "/documents",
+            params={"doc_type": "purchase_order"},
+            files={"file": ("order.pdf", payload, "application/pdf")},
+        )
+        assert response.status_code == 202, response.text
+        document_id = uuid.UUID(response.json()["document_id"])
+        with session_scope() as session:
+            document = session.get(Document, document_id)
+            created.append(document.sha256)
+            assert document.doc_type == "purchase_order"
+        assert client.get(f"/documents/{document_id}").json()["doc_type"] == "purchase_order"
+
+    def test_the_default_is_still_the_invoice_pipeline(self, client, unique_pdf_bytes):
+        payload, created = unique_pdf_bytes
+        response = client.post("/documents", files={"file": ("x.pdf", payload, "application/pdf")})
+        document_id = uuid.UUID(response.json()["document_id"])
+        with session_scope() as session:
+            document = session.get(Document, document_id)
+            created.append(document.sha256)
+            assert document.doc_type == "invoice"

@@ -1,0 +1,224 @@
+{
+  "document_type": "purchase order",
+  "prompt": {
+    "intro": "Purchase orders may be in English or German (Bestellung); the buyer issues the order and the vendor is the supplier it is sent to.",
+    "field_notes": {
+      "buyer": "the ordering organization, whose letterhead the order carries",
+      "vendor": "the supplier the order is addressed to",
+      "shipping": "the freight or delivery charge as a separate amount, \"0\" if the order is free of it",
+      "line_items": "one entry per row of the order's item table, in document order"
+    }
+  },
+  "fields": {
+    "buyer": {
+      "kind": "text"
+    },
+    "vendor": {
+      "kind": "text"
+    },
+    "po_number": {
+      "kind": "text"
+    },
+    "order_date": {
+      "kind": "date"
+    },
+    "delivery_date": {
+      "kind": "date"
+    },
+    "currency": {
+      "kind": "enum",
+      "values": [
+        "USD",
+        "EUR"
+      ]
+    },
+    "subtotal": {
+      "kind": "money"
+    },
+    "shipping": {
+      "kind": "money"
+    },
+    "total": {
+      "kind": "money",
+      "positive": true
+    },
+    "line_items": {
+      "kind": "table",
+      "item_fields": {
+        "description": {
+          "kind": "text"
+        },
+        "quantity": {
+          "kind": "quantity"
+        },
+        "unit_price": {
+          "kind": "money"
+        },
+        "amount": {
+          "kind": "money"
+        }
+      }
+    }
+  },
+  "validation_rules": [
+    {
+      "name": "line_items_sum_to_subtotal",
+      "type": "sum_equals",
+      "fields": [
+        "subtotal",
+        "line_items"
+      ],
+      "items": "line_items",
+      "item_field": "amount",
+      "target": "subtotal"
+    },
+    {
+      "name": "subtotal_plus_shipping_equals_total",
+      "type": "terms_equal",
+      "fields": [
+        "subtotal",
+        "shipping",
+        "total"
+      ],
+      "terms": [
+        "subtotal",
+        "shipping"
+      ],
+      "target": "total"
+    },
+    {
+      "name": "order_date_parses",
+      "type": "required",
+      "fields": [
+        "order_date"
+      ]
+    },
+    {
+      "name": "delivery_not_before_order_date",
+      "type": "date_order",
+      "fields": [
+        "delivery_date",
+        "order_date"
+      ],
+      "earlier": "order_date",
+      "later": "delivery_date"
+    },
+    {
+      "name": "po_number_format",
+      "type": "regex",
+      "fields": [
+        "po_number"
+      ],
+      "field": "po_number",
+      "pattern": "PO-\\d{4}-\\d{5}|BA-\\d{4}/\\d{4}"
+    },
+    {
+      "name": "row_arithmetic",
+      "type": "product_equals",
+      "fields": [
+        "line_items"
+      ],
+      "items": "line_items",
+      "factors": [
+        "quantity",
+        "unit_price"
+      ],
+      "result": "amount"
+    }
+  ],
+  "extraction_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "buyer",
+      "vendor",
+      "po_number",
+      "order_date",
+      "delivery_date",
+      "currency",
+      "subtotal",
+      "shipping",
+      "total",
+      "line_items"
+    ],
+    "properties": {
+      "buyer": {
+        "type": "string",
+        "minLength": 1,
+        "description": "The ordering organization as printed"
+      },
+      "vendor": {
+        "type": "string",
+        "minLength": 1,
+        "description": "The supplier the order is addressed to"
+      },
+      "po_number": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exactly as printed on the document"
+      },
+      "order_date": {
+        "type": "string",
+        "format": "date",
+        "description": "ISO-8601 YYYY-MM-DD"
+      },
+      "delivery_date": {
+        "type": "string",
+        "format": "date",
+        "description": "ISO-8601 YYYY-MM-DD"
+      },
+      "currency": {
+        "type": "string",
+        "enum": [
+          "USD",
+          "EUR"
+        ],
+        "description": "ISO 4217 code"
+      },
+      "subtotal": {
+        "type": "string",
+        "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
+      },
+      "shipping": {
+        "type": "string",
+        "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
+      },
+      "total": {
+        "type": "string",
+        "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
+      },
+      "line_items": {
+        "type": "array",
+        "description": "One entry per row of the order's item table, in document order",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "description",
+            "quantity",
+            "unit_price",
+            "amount"
+          ],
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "quantity": {
+              "type": "string",
+              "description": "e.g. \"3\""
+            },
+            "unit_price": {
+              "type": "string",
+              "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
+            },
+            "amount": {
+              "type": "string",
+              "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
+            }
+          }
+        }
+      }
+    }
+  },
+  "sla_hours": 48
+}
