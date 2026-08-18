@@ -38,10 +38,9 @@ def client():
     except Exception:
         pytest.skip("postgres is not migrated/reachable")
 
-    from docfactory_api.main import app
-    from fastapi.testclient import TestClient
+    from conftest import authenticated_client
 
-    with TestClient(app) as test_client:
+    with authenticated_client() as test_client:
         yield test_client
 
 

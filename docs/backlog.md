@@ -44,6 +44,29 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **No CI workflow yet.** `make test` and `make lint` are CI-ready and green;
   wiring GitHub Actions is a later phase.
 
+## From Phase 3a
+
+- **The app DB role is created by a migration.** Roles are cluster-level, not
+  schema-level, so this is unusual; it lives there to keep local dev
+  reproducible from `make migrate` alone. In AWS the role and its password
+  belong in Terraform + Secrets Manager, and the migration should assert the
+  role exists rather than create it.
+- **`tenants.id` is a text slug, not a uuid.** It doubles as the object-store
+  prefix and appears in every log line, and every existing tenant_id column
+  already holds exactly this value — so a uuid would have meant rewriting five
+  tables for no isolation benefit. The RLS policy compares text.
+- **`tenants`/`api_keys` carry no RLS policy** because authentication must read
+  them before a tenant context exists. They are readable by the app role and
+  writable only by the owner. A tenant-management API needs its own
+  authorization story (admin keys), which does not exist yet.
+- **Cost is a flat per-call price.** Real token-based metering is Phase 4;
+  `cost_usd` is now populated so budget caps are enforceable and testable.
+- **Budget check is not transactional with the spend.** Two concurrent workers
+  can both pass the cap check and both charge, overshooting by one call each.
+  Acceptable at current volume; a reservation or a DB-side counter fixes it.
+- **No admin API for tenants or keys.** Tenants are seeded by migration and
+  keys issued via `core.auth` from a shell. Fine while there is one tenant.
+
 ## From Phase 2.3c
 
 - **No reviewer UI.** The review queue is API + tests only. A deliberately

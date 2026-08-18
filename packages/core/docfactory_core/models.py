@@ -48,10 +48,20 @@ class DocumentStatus(enum.StrEnum):
     # column rather than a native Postgres enum.
     APPROVED = "approved"
     NEEDS_REVIEW = "needs_review"
+    # The tenant's budget cap was reached before this document could be
+    # extracted. Distinct from FAILED: nothing is wrong with the document, and
+    # it becomes processable again when the cap is raised.
+    BUDGET_EXCEEDED = "budget_exceeded"
     FAILED = "failed"
 
 
 _STATUS_CHECK = "status IN ({})".format(", ".join(f"'{s}'" for s in DocumentStatus))
+
+
+class TenantStatus(enum.StrEnum):
+    ACTIVE = "active"
+    # Over budget: no further model calls until the cap is raised.
+    PAUSED = "paused"
 
 
 class Base(DeclarativeBase):
@@ -70,6 +80,65 @@ class ColumnsMixin:
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+
+class Tenant(Base):
+    """A customer of the platform.
+
+    The primary key is a slug, not a uuid, because it is also the object-store
+    prefix ({tenant_id}/incoming/...) and appears in every log line — a
+    readable key is worth more here than a synthetic one, and every
+    tenant_id column in the schema already holds exactly this value.
+    """
+
+    __tablename__ = "tenants"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=TenantStatus.ACTIVE)
+    # Per-tenant settings that were global constants before Phase 3.
+    review_sla_hours: Mapped[float] = mapped_column(
+        Numeric(8, 2), nullable=False, server_default="24"
+    )
+    budget_usd: Mapped[float] = mapped_column(Numeric(12, 4), nullable=False, server_default="100")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ({})".format(", ".join(f"'{s}'" for s in TenantStatus)),
+            name="ck_tenants_status",
+        ),
+    )
+
+
+class ApiKey(ColumnsMixin, Base):
+    """An API credential for a tenant.
+
+    Only a hash is stored. The plaintext key is shown once at issue time and
+    is unrecoverable afterwards, so a database leak cannot be replayed as
+    valid credentials.
+    """
+
+    __tablename__ = "api_keys"
+
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Leading characters, for identifying a key in a UI without revealing it.
+    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("key_hash", name="uq_api_keys_hash"),
+        Index("ix_api_keys_tenant", "tenant_id"),
     )
 
 

@@ -23,7 +23,16 @@ class Settings(BaseSettings):
         protected_namespaces=(),
     )
 
-    database_url: str = "postgresql+psycopg://docfactory:docfactory@localhost:5432/docfactory"
+    # The application connects as a NON-SUPERUSER role: superusers bypass row
+    # level security entirely, even with FORCE ROW LEVEL SECURITY, so using the
+    # owner here would silently disable every isolation policy.
+    database_url: str = (
+        "postgresql+psycopg://docfactory_app:docfactory_app@localhost:5432/docfactory"
+    )
+    # Owner connection, used only by Alembic: migrations create tables, roles
+    # and policies, which the app role must not be able to do.
+    database_admin_url: str = "postgresql+psycopg://docfactory:docfactory@localhost:5432/docfactory"
+    app_db_password: str = "docfactory_app"
 
     aws_region: str = "us-east-1"
 
@@ -72,7 +81,13 @@ class Settings(BaseSettings):
     # constant: Phase 3 makes this per-tenant/per-pipeline, and the deadline is
     # frozen onto each task at creation so changing it cannot retroactively
     # breach work already queued.
+    # Default for newly created tenants; the live value is per-tenant on the
+    # tenants row (Phase 3 made it configurable per tenant).
     review_sla_hours: float = 24.0
+
+    # Flat price per model call. Real token-based metering is Phase 4; this is
+    # enough to make budget caps enforceable and testable now.
+    cost_per_extraction_usd: float = 0.01
 
     phoenix_collector_endpoint: str = "http://localhost:6006"
 

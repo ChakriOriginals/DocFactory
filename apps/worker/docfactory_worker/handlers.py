@@ -17,10 +17,12 @@ to the DLQ after max_receive_count receives, with the error captured on the
 document row.
 """
 
+import functools
 import logging
 import uuid
 from datetime import UTC, datetime
 
+from docfactory_core.budget import call_cost_usd, check_budget
 from docfactory_core.confidence import ConfidenceReport, failed_extraction_report, score_extraction
 from docfactory_core.confidence_model import (
     RoutingDecision,
@@ -28,7 +30,7 @@ from docfactory_core.confidence_model import (
     route_extraction,
 )
 from docfactory_core.config import get_settings
-from docfactory_core.db import session_scope
+from docfactory_core.db import current_tenant, session_scope, tenant_context
 from docfactory_core.extraction import ExtractionOutcome, run_extraction
 from docfactory_core.llm import get_llm_client
 from docfactory_core.models import Document, DocumentStatus, Extraction, ExtractionField
@@ -56,8 +58,27 @@ def _clients() -> tuple[ObjectStore, QueueBroker]:
     return _store, _broker
 
 
+def tenant_scoped(handler):
+    """Bind the message's tenant for the whole handler.
+
+    Every read the handler makes passes through RLS, so the tenant has to be
+    known before the first query — which is why the message carries it rather
+    than the handler discovering it by reading the document.
+    """
+
+    @functools.wraps(handler)
+    def wrapper(payload: dict, **kwargs):
+        tenant_id = payload.get("tenant_id") or get_settings().default_tenant_id
+        with tenant_context(tenant_id):
+            return handler(payload, **kwargs)
+
+    return wrapper
+
+
+@tenant_scoped
 def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
+    tenant_id = current_tenant.get()
     store, broker = _clients()
     settings = get_settings()
 
@@ -106,11 +127,15 @@ def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool =
             document.text_s3_key = text_key
             document.text_chars = len(text)
             document.parsed_at = datetime.now(UTC)
-        broker.send(settings.extract_queue, inject_trace_context({"document_id": str(document_id)}))
+        broker.send(
+            settings.extract_queue,
+            inject_trace_context({"document_id": str(document_id), "tenant_id": tenant_id}),
+        )
         span.set_attribute("outcome", "parsed")
         log.info("parsed", extra={"chars": len(text)})
 
 
+@tenant_scoped
 def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
     store, _ = _clients()
@@ -126,12 +151,34 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
             document = session.get(Document, document_id, with_for_update=True)
             if document is None:
                 raise RuntimeError(f"document {document_id} not found")
-            if document.status not in (DocumentStatus.PARSED, DocumentStatus.EXTRACTING):
+            if document.status not in (
+                DocumentStatus.PARSED,
+                DocumentStatus.EXTRACTING,
+                # A document paused on budget is resumable once the cap rises.
+                DocumentStatus.BUDGET_EXCEEDED,
+            ):
                 span.set_attribute("outcome", f"skip:{document.status}")
                 log.info("skipping duplicate delivery", extra={"status": document.status})
                 return
             document.status = DocumentStatus.EXTRACTING
             tenant_id, text_key = document.tenant_id, document.text_s3_key
+
+        # Budget gate before the model call: the point is not to spend the
+        # money, so checking afterwards would be too late.
+        budget = check_budget(tenant_id)
+        if budget.exceeded:
+            with session_scope() as session:
+                document = session.get(Document, document_id, with_for_update=True)
+                document.status = DocumentStatus.BUDGET_EXCEEDED
+                document.last_error = (
+                    f"tenant budget exhausted: spent {budget.spent_usd} of {budget.budget_usd} USD"
+                )
+            span.set_attribute("outcome", "budget_exceeded")
+            log.warning(
+                "paused: tenant over budget",
+                extra={"spent_usd": str(budget.spent_usd), "budget_usd": str(budget.budget_usd)},
+            )
+            return
 
         try:
             text = store.get_object(text_key).decode("utf-8")
@@ -237,6 +284,7 @@ def _store_extraction(
             prompt_tokens=outcome.input_tokens,
             completion_tokens=outcome.output_tokens,
             latency_ms=outcome.latency_ms,
+            cost_usd=call_cost_usd(),
         )
         session.add(extraction)
         session.flush()

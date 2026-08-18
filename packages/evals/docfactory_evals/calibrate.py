@@ -45,7 +45,7 @@ import numpy as np
 from docfactory_core.confidence import RULE_FIELDS, score_extraction
 from docfactory_core.config import get_settings
 from docfactory_core.corruption import plan_corruption
-from docfactory_core.db import session_scope
+from docfactory_core.db import session_scope, tenant_context
 from docfactory_core.extraction import run_extraction
 from docfactory_core.llm import get_llm_client
 from docfactory_core.models import Document, DocumentStatus, Extraction
@@ -545,10 +545,11 @@ def main() -> None:
     parser.add_argument("--target-precision", type=float, default=0.99)
     args = parser.parse_args()
 
-    if args.build or not args.fit_only:
-        build_dataset(limit=args.limit)
-
-    rows = load_rows()
+    # The study operates on one tenant's corpus; RLS needs it bound.
+    with tenant_context(get_settings().default_tenant_id):
+        if args.build or not args.fit_only:
+            build_dataset(limit=args.limit)
+        rows = load_rows()
     if not rows:
         raise SystemExit("no calibration rows found — run with --build first")
 

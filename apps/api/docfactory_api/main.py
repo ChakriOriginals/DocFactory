@@ -17,9 +17,10 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import BinaryIO, Literal
 
+from docfactory_core.auth import AuthError, resolve_tenant
 from docfactory_core.bootstrap import ensure_infra
 from docfactory_core.config import get_settings
-from docfactory_core.db import session_scope
+from docfactory_core.db import current_tenant, session_scope
 from docfactory_core.logging import configure_logging, document_id_var
 from docfactory_core.models import (
     Document,
@@ -32,7 +33,8 @@ from docfactory_core.queues import QueueBroker
 from docfactory_core.review import open_tasks, queue_depth, resolve_task
 from docfactory_core.storage import ObjectStore
 from docfactory_core.tracing import inject_trace_context, setup_tracing
-from fastapi import FastAPI, HTTPException, Response, UploadFile
+from fastapi import FastAPI, HTTPException, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
 from opentelemetry import trace
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -56,6 +58,35 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="DocFactory API", lifespan=lifespan)
+
+# Endpoints reachable without a tenant: liveness and the OpenAPI surface.
+_UNAUTHENTICATED_PATHS = frozenset(
+    {"/healthz", "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+)
+
+
+@app.middleware("http")
+async def bind_tenant(request: Request, call_next):
+    """Resolve the API key and bind its tenant for the whole request.
+
+    Binding here rather than per-endpoint means an endpoint physically cannot
+    run without a tenant: session_scope raises without one, and the RLS
+    policies see no tenant and return nothing. Forgetting the plumbing costs
+    access, never privacy.
+    """
+    if request.url.path in _UNAUTHENTICATED_PATHS:
+        return await call_next(request)
+    try:
+        tenant_id = resolve_tenant(request.headers.get("x-api-key"))
+    except AuthError as exc:
+        return JSONResponse(status_code=401, content={"detail": str(exc)})
+
+    token = current_tenant.set(tenant_id)
+    try:
+        response = await call_next(request)
+    finally:
+        current_tenant.reset(token)
+    return response
 
 
 class UploadResponse(BaseModel):
@@ -127,7 +158,7 @@ def healthz() -> dict:
 @app.post("/documents", status_code=202, response_model=UploadResponse)
 def upload_document(file: UploadFile, response: Response) -> UploadResponse:
     settings = get_settings()
-    tenant_id = settings.default_tenant_id
+    tenant_id = current_tenant.get()
 
     sha256, size = _hash_stream(file.file)
     if size == 0:
@@ -184,7 +215,10 @@ def upload_document(file: UploadFile, response: Response) -> UploadResponse:
         span.set_attribute("document_id", str(document.id))
         app.state.broker.send(
             settings.parse_queue,
-            inject_trace_context({"document_id": str(document.id)}),
+            # The message carries its tenant: the worker must bind a tenant
+            # context before it can read anything, so it cannot discover the
+            # tenant by reading the document first.
+            inject_trace_context({"document_id": str(document.id), "tenant_id": tenant_id}),
         )
         log.info("document received", extra={"sha256": sha256, "bytes": size})
         return UploadResponse(document_id=document.id, status=DocumentStatus.RECEIVED)
@@ -192,6 +226,13 @@ def upload_document(file: UploadFile, response: Response) -> UploadResponse:
 
 @app.get("/documents/{document_id}", response_model=DocumentView)
 def get_document(document_id: uuid.UUID) -> DocumentView:
+    """Fetch a document.
+
+    Another tenant's document is a 404, not a 403: RLS filters the row out
+    before this code sees it, so "absent" and "not yours" are indistinguishable
+    from here — which is precisely the behaviour we want, since a 403 would
+    confirm the id exists somewhere.
+    """
     with session_scope() as session:
         document = session.get(Document, document_id)
         if document is None:
@@ -292,6 +333,7 @@ def review_queue_stats() -> dict:
 
 @app.get("/review/tasks/{task_id}", response_model=ReviewTaskDetail)
 def get_review_task(task_id: uuid.UUID) -> ReviewTaskDetail:
+    """Another tenant's task is a 404 for the same reason as documents."""
     with session_scope() as session:
         task = session.get(ReviewTask, task_id)
         if task is None:

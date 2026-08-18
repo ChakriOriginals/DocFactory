@@ -57,12 +57,13 @@ def test_queues_exist_with_dlq_redrive_policy():
 
 def test_object_store_roundtrip():
     store = ObjectStore()
-    key = f"test/{uuid.uuid4()}.bin"
+    # Keys must live under the tenant prefix since Phase 3.
+    key = f"{get_settings().default_tenant_id}/test/{uuid.uuid4()}.bin"
     payload = b"docfactory roundtrip"
     store.put_object(key, payload, content_type="application/octet-stream")
     try:
         assert store.get_object(key) == payload
-        assert key in list(store.list_keys("test/"))
+        assert key in list(store.list_keys(f"{get_settings().default_tenant_id}/test/"))
     finally:
         store._s3.delete_object(Bucket=store.bucket, Key=key)
 

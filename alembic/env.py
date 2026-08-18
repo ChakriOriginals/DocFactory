@@ -8,7 +8,9 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+# Migrations run as the owner: they create tables, roles and RLS policies,
+# none of which the restricted application role is permitted to do.
+config.set_main_option("sqlalchemy.url", get_settings().database_admin_url)
 
 target_metadata = Base.metadata
 
