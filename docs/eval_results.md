@@ -25,7 +25,7 @@
 
 ## purchase order (`purchase_order` v1)
 
-- golden set: 40 of 120 docs, deterministic sha256(doc_id) split (limited from 100)
+- golden set: 40 of 120 docs, deterministic sha256(doc_id) split, capped at a third of the corpus (asked 100)
 - digital evaluated: 28 · needs_ocr (excluded, no text layer): 12 · extraction failures (counted as wrong): 0
 
 | field | euro (n=13) | standard (n=15) | overall |
