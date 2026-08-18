@@ -338,9 +338,19 @@ def sweep(p: np.ndarray, y: np.ndarray) -> list[tuple[float, float, float]]:
 # A target only counts as met if it holds over a share of fields worth
 # operating on. Without this floor, a threshold that approves a handful of
 # lucky fields reports 100% precision at ~1% coverage and looks like success,
-# while a reviewer still hand-checks everything. 5% is a judgement call, and
-# it is the only arbitrary constant left in the study.
+# while a reviewer still hand-checks everything. 5% is a judgement call.
 MIN_USEFUL_RATE = 0.05
+
+# How much coverage we will trade for precision once the target is met.
+#
+# Selecting purely on max coverage is what produced the unsafe v2 point: it
+# picked threshold 0.42, which sits below the score band of fields with one
+# failed validation rule and so auto-approved four wrong invoice totals. The
+# same model at 0.67 gave 99.57% precision for 1.4pp less coverage. Buying
+# 1.4% throughput by silently approving wrong totals is the wrong trade for a
+# document platform, so the rule is now: reach max coverage subject to the
+# target, then take the most precise point within this much coverage of it.
+COVERAGE_TOLERANCE = 0.02
 
 
 def operating_point(
@@ -360,7 +370,11 @@ def operating_point(
         point for point in curve if point[2] >= target_precision and point[1] >= MIN_USEFUL_RATE
     ]
     if feasible:
-        return max(feasible, key=lambda point: point[1]), True
+        widest = max(point[1] for point in feasible)
+        # Precision-safety, not max coverage: among the points that give up at
+        # most COVERAGE_TOLERANCE of the best coverage, take the most precise.
+        affordable = [point for point in feasible if point[1] >= widest - COVERAGE_TOLERANCE]
+        return max(affordable, key=lambda point: (point[2], point[1])), True
     usable = [point for point in curve if point[1] >= MIN_USEFUL_RATE]
     if not usable:
         return (1.0, 0.0, 1.0), False
@@ -555,6 +569,9 @@ def main() -> None:
     curve = sweep(p_held, y_held)
     point, target_met = operating_point(curve, args.target_precision)
     threshold, rate, precision = point
+    # Kept for the record: what pure max-coverage selection would have chosen.
+    widest = [c for c in curve if c[2] >= args.target_precision and c[1] >= MIN_USEFUL_RATE]
+    max_coverage_point = max(widest, key=lambda c: c[1]) if widest else point
 
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     _plot_precision_vs_rate(curve, point, DOCS_DIR / "calibration_precision_vs_rate.png")
@@ -574,11 +591,24 @@ def main() -> None:
                     "std": [float(s) for s in sigma],
                 },
                 "operating_point": {
+                    "selection_rule": (
+                        "most precise point within "
+                        f"{COVERAGE_TOLERANCE:.0%} coverage of the max-coverage point"
+                    ),
                     "threshold": threshold,
                     "target_precision": args.target_precision,
                     "target_met": target_met,
                     "measured_precision": precision,
                     "auto_approve_rate": rate,
+                    "max_coverage_alternative": {
+                        "threshold": max_coverage_point[0],
+                        "auto_approve_rate": max_coverage_point[1],
+                        "measured_precision": max_coverage_point[2],
+                        "note": (
+                            "What max-coverage selection would have picked. Rejected: it "
+                            "auto-approves wrong invoice totals to buy ~1.4% throughput."
+                        ),
+                    },
                 },
                 "provenance": {
                     "fitted_at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -598,14 +628,25 @@ def main() -> None:
     )
 
     report = _render_report(
-        train, held, p_held, y_held, weights, point, target_met, curve, args.target_precision
+        train,
+        held,
+        p_held,
+        y_held,
+        weights,
+        point,
+        target_met,
+        curve,
+        args.target_precision,
+        max_coverage_point,
     )
     (DOCS_DIR / "calibration_results.md").write_text(report)
     print(report)
     print(f"config written to {CONFIG_PATH.relative_to(REPO_ROOT)}")
 
 
-def _render_report(train, held, p_held, y_held, weights, point, target_met, curve, target):
+def _render_report(
+    train, held, p_held, y_held, weights, point, target_met, curve, target, max_coverage_point
+):
     threshold, rate, precision = point
     meta = dataset_meta()
     n_train_docs = len({row.doc_id for row in train})

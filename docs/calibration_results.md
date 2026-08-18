@@ -1,6 +1,6 @@
 # Confidence calibration study
 
-Fitted 2026-08-18 · git `799b3dd` · dataset built 2026-08-18T01:51:46+00:00 from 345 documents · provider `mock` · corruption rate 0.35 (seed 1337)
+Fitted 2026-08-18 · git `fb07f68` · dataset built 2026-08-18T01:51:46+00:00 from 345 documents · provider `mock` · corruption rate 0.35 (seed 1337)
 
 Unit of analysis is the **field**: the decision being calibrated is whether one
 cell can be accepted without a human looking at it. Weights are fitted on the
@@ -19,22 +19,22 @@ Target met.
 
 | | value |
 |---|---|
-| threshold | **0.4200** |
-| auto-approve rate | **94.9%** of fields |
-| precision among auto-approved | **99.00%** |
-| fields still sent to review | 5.1% |
+| threshold | **0.6750** |
+| auto-approve rate | **93.1%** of fields |
+| precision among auto-approved | **99.71%** |
+| fields still sent to review | 6.9% |
 | target met | **yes** |
 
 ### What each precision target buys
 
 | target | reachable | threshold | auto-approve rate | actual precision |
 |---|---|---|---|---|
-| 99.5% | yes | 0.670 | 93.5% | 99.57% |
-| 99.0% | yes | 0.420 | 94.9% | 99.00% |
-| 98.5% | yes | 0.350 | 95.4% | 98.58% |
-| 98.0% | yes | 0.340 | 96.1% | 98.17% |
-| 97.0% | yes | 0.005 | 96.8% | 97.49% |
-| 95.0% | yes | 0.005 | 96.8% | 97.49% |
+| 99.5% | yes | 0.675 | 93.1% | 99.71% |
+| 99.0% | yes | 0.675 | 93.1% | 99.71% |
+| 98.5% | yes | 0.670 | 93.5% | 99.57% |
+| 98.0% | yes | 0.540 | 94.7% | 99.14% |
+| 97.0% | yes | 0.420 | 94.9% | 99.00% |
+| 95.0% | yes | 0.420 | 94.9% | 99.00% |
 
 ![precision vs auto-approve rate](calibration_precision_vs_rate.png)
 
@@ -60,9 +60,9 @@ are comparable across features.
 
 | layout | fields | auto-approve rate | precision |
 |---|---|---|---|
-| classic | 260 | 96.2% | 99.60% |
-| euro | 180 | 87.2% | 98.73% |
-| modern | 300 | 98.3% | 98.64% |
+| classic | 260 | 95.0% | 100.00% |
+| euro | 180 | 85.6% | 99.35% |
+| modern | 300 | 96.0% | 99.65% |
 
 ## By injected error class (holdout)
 
@@ -70,21 +70,19 @@ Documents are grouped by the error deliberately injected into them. `none` means
 
 | error class | fields | auto-approve rate | precision |
 |---|---|---|---|
-| `arithmetic_drift` | 40 | 97.5% | 89.74% |
+| `arithmetic_drift` | 40 | 67.5% | 100.00% |
 | `none` | 470 | 98.1% | 99.78% |
-| `shifted_date` | 100 | 85.0% | 98.82% |
+| `shifted_date` | 100 | 84.0% | 100.00% |
 | `transposed_line_amounts` | 60 | 88.3% | 100.00% |
 | `truncated_vendor` | 40 | 92.5% | 97.30% |
 | `wrong_vendor` | 30 | 90.0% | 100.00% |
 
 ## Where the ceiling comes from
 
-Of 42 wrong fields in the holdout, 7 would still be auto-approved at threshold 0.420. These are the residual error — the reason a higher precision target is or is not reachable.
+Of 42 wrong fields in the holdout, 2 would still be auto-approved at threshold 0.675. These are the residual error — the reason a higher precision target is or is not reachable.
 
 | injected class | field | count |
 |---|---|---|
-| `arithmetic_drift` | total | 4 |
-| `shifted_date` | invoice_date | 1 |
 | `truncated_vendor` | vendor | 1 |
 | `none` | vendor | 1 |
 

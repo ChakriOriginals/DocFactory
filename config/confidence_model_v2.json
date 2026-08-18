@@ -41,15 +41,22 @@
     ]
   },
   "operating_point": {
-    "threshold": 0.42,
+    "selection_rule": "most precise point within 2% coverage of the max-coverage point",
+    "threshold": 0.675,
     "target_precision": 0.99,
     "target_met": true,
-    "measured_precision": 0.99002849002849,
-    "auto_approve_rate": 0.9486486486486486
+    "measured_precision": 0.9970972423802612,
+    "auto_approve_rate": 0.9310810810810811,
+    "max_coverage_alternative": {
+      "threshold": 0.42,
+      "auto_approve_rate": 0.9486486486486486,
+      "measured_precision": 0.99002849002849,
+      "note": "What max-coverage selection would have picked. Rejected: it auto-approves wrong invoice totals to buy ~1.4% throughput."
+    }
   },
   "provenance": {
-    "fitted_at": "2026-08-18T01:51:47+00:00",
-    "git_sha": "799b3dd",
+    "fitted_at": "2026-08-18T02:12:52+00:00",
+    "git_sha": "fb07f68",
     "train_rows": 2710,
     "holdout_rows": 740,
     "dataset": {
