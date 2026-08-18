@@ -61,7 +61,8 @@ PDF_DIR = REPO_ROOT / "data" / "synth" / "out"
 GROUND_TRUTH = PDF_DIR / "ground_truth.jsonl"
 LABELS_PATH = REPO_ROOT / "data" / "calibration" / "error_classes.jsonl"
 META_PATH = REPO_ROOT / "data" / "calibration" / "dataset_meta.json"
-CONFIG_PATH = REPO_ROOT / "config" / "confidence_model_v1.json"
+CONFIG_VERSION = 2
+CONFIG_PATH = REPO_ROOT / "config" / f"confidence_model_v{CONFIG_VERSION}.json"
 DOCS_DIR = REPO_ROOT / "docs"
 
 # Namespace so a document's row id is stable across rebuilds.
@@ -78,6 +79,7 @@ FEATURES = (
     "shape_suspect",  # fragmented/truncated/implausible value
     "row_arithmetic_broken",  # a line row where qty x price != amount
     "needed_retry",  # extraction took a second attempt
+    "date_corroboration",  # does this date appear on the page (2.3a)
 )
 
 
@@ -236,6 +238,16 @@ def _features_for(field: str, signals: dict) -> list[float]:
     rows_broken = (
         1.0 if (field == "line_items" and signals.get("line_items.inconsistent_rows")) else 0.0
     )
+
+    # Dates carry their own corroboration; other fields have no opinion, so
+    # they take 1.0 and the weight simply does not act on them.
+    if field in ("invoice_date", "due_date"):
+        date_score = float(signals.get(f"date_corroboration.{field}", 1.0))
+        term = signals.get("date_corroboration.payment_term")
+        if term is not None:
+            date_score = min(date_score, float(term))
+    else:
+        date_score = 1.0
     return [
         float(len(implicating)),
         float(np.log1p(residual / scale)),
@@ -243,6 +255,7 @@ def _features_for(field: str, signals: dict) -> list[float]:
         shape,
         rows_broken,
         1.0 if float(signals.get("attempts", 1)) > 1 else 0.0,
+        date_score,
     ]
 
 
@@ -551,7 +564,7 @@ def main() -> None:
     CONFIG_PATH.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": CONFIG_VERSION,
                 "model": "logistic",
                 "features": list(FEATURES),
                 "weights": [float(w) for w in weights[:-1]],

@@ -1,0 +1,65 @@
+{
+  "schema_version": 2,
+  "model": "logistic",
+  "features": [
+    "implicating_rules_failed",
+    "log_residual_magnitude",
+    "groundedness",
+    "shape_suspect",
+    "row_arithmetic_broken",
+    "needed_retry",
+    "date_corroboration"
+  ],
+  "weights": [
+    -0.7053155105550027,
+    -0.00338238898904519,
+    1.7263377363358867,
+    -1.7772096232740406,
+    -0.7066449762041916,
+    0.0,
+    0.5414535686082318
+  ],
+  "bias": 4.4245134886079835,
+  "standardization": {
+    "mean": [
+      0.026568265682656828,
+      0.00045114411012193295,
+      0.9936947232472323,
+      0.028782287822878228,
+      0.004428044280442804,
+      0.0,
+      0.9915832841328414
+    ],
+    "std": [
+      0.1608178885040703,
+      0.0032420441395324432,
+      0.06932630595613735,
+      0.1671941029610406,
+      0.06639606040334933,
+      1e-09,
+      0.08729969525638855
+    ]
+  },
+  "operating_point": {
+    "threshold": 0.42,
+    "target_precision": 0.99,
+    "target_met": true,
+    "measured_precision": 0.99002849002849,
+    "auto_approve_rate": 0.9486486486486486
+  },
+  "provenance": {
+    "fitted_at": "2026-08-18T01:51:47+00:00",
+    "git_sha": "799b3dd",
+    "train_rows": 2710,
+    "holdout_rows": 740,
+    "dataset": {
+      "built_at": "2026-08-18T01:51:46+00:00",
+      "documents": 345,
+      "corruption_rate": 0.35,
+      "corruption_seed": 1337,
+      "model_provider": "mock",
+      "git_sha": "799b3dd"
+    },
+    "note": "Fitted on non-golden documents; operating point measured on the held-out golden set. Consumed by Phase 2.3 routing."
+  }
+}

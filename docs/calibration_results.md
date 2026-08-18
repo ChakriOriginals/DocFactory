@@ -1,6 +1,6 @@
 # Confidence calibration study
 
-Fitted 2026-08-18 · git `ca1342b` · dataset built 2026-08-18T00:55:25+00:00 from 345 documents · provider `mock` · corruption rate 0.35 (seed 1337)
+Fitted 2026-08-18 · git `799b3dd` · dataset built 2026-08-18T01:51:46+00:00 from 345 documents · provider `mock` · corruption rate 0.35 (seed 1337)
 
 Unit of analysis is the **field**: the decision being calibrated is whether one
 cell can be accepted without a human looking at it. Weights are fitted on the
@@ -15,24 +15,24 @@ so the threshold is not reported on its own training data.
 
 Target: auto-approved fields must be **>= 99%** correct.
 
-**Not reachable at any usable coverage.** The best achievable precision is 98.29%, so the point below is the best available — not one that meets the 99% target. Why, and what it would take, is in *Where the ceiling comes from*.
+Target met.
 
 | | value |
 |---|---|
-| threshold | **0.6750** |
+| threshold | **0.4200** |
 | auto-approve rate | **94.9%** of fields |
-| precision among auto-approved | **98.29%** |
+| precision among auto-approved | **99.00%** |
 | fields still sent to review | 5.1% |
-| target met | **NO** |
+| target met | **yes** |
 
 ### What each precision target buys
 
 | target | reachable | threshold | auto-approve rate | actual precision |
 |---|---|---|---|---|
-| 99.5% | **no** | 0.675 | 94.9% | 98.29% |
-| 99.0% | **no** | 0.675 | 94.9% | 98.29% |
-| 98.5% | **no** | 0.675 | 94.9% | 98.29% |
-| 98.0% | yes | 0.670 | 95.3% | 98.16% |
+| 99.5% | yes | 0.670 | 93.5% | 99.57% |
+| 99.0% | yes | 0.420 | 94.9% | 99.00% |
+| 98.5% | yes | 0.350 | 95.4% | 98.58% |
+| 98.0% | yes | 0.340 | 96.1% | 98.17% |
 | 97.0% | yes | 0.005 | 96.8% | 97.49% |
 | 95.0% | yes | 0.005 | 96.8% | 97.49% |
 
@@ -44,13 +44,14 @@ Target: auto-approved fields must be **>= 99%** correct.
 
 | feature | weight |
 |---|---|
-| `implicating_rules_failed` | -0.592 |
+| `implicating_rules_failed` | -0.705 |
 | `log_residual_magnitude` | -0.003 |
-| `groundedness` | +1.566 |
-| `shape_suspect` | -1.669 |
-| `row_arithmetic_broken` | -0.664 |
+| `groundedness` | +1.726 |
+| `shape_suspect` | -1.777 |
+| `row_arithmetic_broken` | -0.707 |
 | `needed_retry` | +0.000 |
-| _bias_ | +3.821 |
+| `date_corroboration` | +0.541 |
+| _bias_ | +4.425 |
 
 Positive weight = pushes towards *correct*. Standardized inputs, so magnitudes
 are comparable across features.
@@ -59,9 +60,9 @@ are comparable across features.
 
 | layout | fields | auto-approve rate | precision |
 |---|---|---|---|
-| classic | 260 | 96.9% | 98.02% |
-| euro | 180 | 88.9% | 97.50% |
-| modern | 300 | 96.7% | 98.97% |
+| classic | 260 | 96.2% | 99.60% |
+| euro | 180 | 87.2% | 98.73% |
+| modern | 300 | 98.3% | 98.64% |
 
 ## By injected error class (holdout)
 
@@ -69,20 +70,21 @@ Documents are grouped by the error deliberately injected into them. `none` means
 
 | error class | fields | auto-approve rate | precision |
 |---|---|---|---|
-| `arithmetic_drift` | 40 | 67.5% | 100.00% |
+| `arithmetic_drift` | 40 | 97.5% | 89.74% |
 | `none` | 470 | 98.1% | 99.78% |
-| `shifted_date` | 100 | 97.0% | 89.69% |
+| `shifted_date` | 100 | 85.0% | 98.82% |
 | `transposed_line_amounts` | 60 | 88.3% | 100.00% |
 | `truncated_vendor` | 40 | 92.5% | 97.30% |
 | `wrong_vendor` | 30 | 90.0% | 100.00% |
 
 ## Where the ceiling comes from
 
-Of 42 wrong fields in the holdout, 12 would still be auto-approved at threshold 0.675. These are the residual error — the reason a higher precision target is or is not reachable.
+Of 42 wrong fields in the holdout, 7 would still be auto-approved at threshold 0.420. These are the residual error — the reason a higher precision target is or is not reachable.
 
 | injected class | field | count |
 |---|---|---|
-| `shifted_date` | invoice_date | 10 |
+| `arithmetic_drift` | total | 4 |
+| `shifted_date` | invoice_date | 1 |
 | `truncated_vendor` | vendor | 1 |
 | `none` | vendor | 1 |
 
@@ -97,6 +99,9 @@ Does the score behave like a probability, or only like a ranking?
 | predicted | empirical | n |
 |---|---|---|
 | 0.003 | 0.000 | 24 |
-| 0.222 | 0.000 | 2 |
+| 0.246 | 0.000 | 2 |
+| 0.349 | 0.200 | 10 |
+| 0.420 | 0.500 | 2 |
+| 0.535 | 0.000 | 1 |
 | 0.667 | 0.667 | 12 |
-| 0.988 | 0.983 | 702 |
+| 0.994 | 0.997 | 689 |

@@ -32,6 +32,12 @@ Three things about the design are deliberate:
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from docfactory_core.date_corroboration import (
+    corroborate_date,
+    corroborate_payment_term,
+    dates_in_text,
+    stated_payment_term,
+)
 from docfactory_core.groundedness import GROUNDEDNESS_THRESHOLD, groundedness
 from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
 
@@ -47,6 +53,16 @@ PENALTY_SUSPECT_FIELD_SHAPE = 0.20  # per-field: empty-ish / implausible value
 # traced back to the source text is the only evidence available that it was
 # invented. Weighted accordingly — still a prior until 2.2c fits it.
 PENALTY_UNGROUNDED_FIELD = 0.35
+
+# Dates that do not appear anywhere on the page. This closes the gap the 2.2c
+# study measured: `shifted_date` accounted for 10 of the 12 errors that
+# survived auto-approval, because every rule it broke was one we do not have.
+# Measured at zero false positives across all 345 clean digital documents
+# before adoption, so it can afford to be strict.
+PENALTY_UNCORROBORATED_DATE = 0.35
+# With 1/(1+days) only an exact match clears this; the constant exists so the
+# calibration can loosen it rather than requiring a code change.
+DATE_CORROBORATION_THRESHOLD = 0.9
 
 # String fields checked against the source text. Money and dates are omitted:
 # they are already constrained by the arithmetic rules, and their canonical
@@ -225,6 +241,30 @@ def score_extraction(
             doc_reasons.append("ungrounded:line_item_description")
             field_penalties["line_items"] += PENALTY_UNGROUNDED_FIELD
             field_reasons["line_items"].append(f"ungrounded_description:{weakest}")
+
+    # --- date corroboration: the only guard on dates against the page ---
+    if source_text is not None:
+        text_dates = dates_in_text(source_text)
+        signals["date_corroboration.text_dates_found"] = len(text_dates)
+        for name in ("invoice_date", "due_date"):
+            score = corroborate_date(getattr(invoice, name), text_dates)
+            signals[f"date_corroboration.{name}"] = score
+            if score < DATE_CORROBORATION_THRESHOLD:
+                doc_penalty += PENALTY_UNCORROBORATED_DATE
+                doc_reasons.append(f"uncorroborated_date:{name}")
+                field_penalties[name] += PENALTY_UNCORROBORATED_DATE
+                field_reasons[name].append(f"not_on_page:{score}")
+
+        term = stated_payment_term(source_text)
+        term_score = corroborate_payment_term(invoice.invoice_date, invoice.due_date, term)
+        signals["date_corroboration.payment_term"] = term_score
+        if term_score is not None and term_score < DATE_CORROBORATION_THRESHOLD:
+            doc_penalty += PENALTY_UNCORROBORATED_DATE
+            doc_reasons.append("payment_term_mismatch")
+            # The stated term pins the interval but not which end moved.
+            for name in ("invoice_date", "due_date"):
+                field_penalties[name] += PENALTY_UNCORROBORATED_DATE / 2
+                field_reasons[name].append(f"term_mismatch:{term_score}")
 
     fields = {
         name: FieldConfidence(name, _clamp(1.0 - penalty), tuple(field_reasons[name]))

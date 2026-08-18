@@ -295,3 +295,70 @@ class TestTruncatedVendorDetection:
         # signal can see this; recorded so the limitation stays visible.
         assert looks_fragmented("RöhRicht") is False
         assert score(make_invoice(vendor="RöhRicht")).doc_confidence == 1.0
+
+
+class TestDateCorroboration:
+    """Closing the 2.2c blind spot: `shifted_date` scored a blind 1.00 because
+    no rule constrained dates against the document itself."""
+
+    # Must contain the fixture's vendor and invoice number too, or the
+    # groundedness signal fires and confuses what this class is testing.
+    _BODY = (
+        "Fernandez-Harris\nInvoice No. INV-2026-00042\n"
+        "Consulting services 2 $400.00 $800.00\n"
+        "Cloud hosting 1 $200.00 $200.00\nTotal Due $1,075.00\n"
+    )
+    SOURCE = _BODY + "Invoice Date 01/17/2026\nDue Date 02/16/2026\n"
+    NO_DATES = _BODY
+
+    def test_dates_printed_on_the_page_score_full_confidence(self):
+        report = score_extraction(
+            make_invoice(), validate_invoice(make_invoice()), source_text=self.SOURCE
+        )
+        assert report.doc_confidence == 1.0
+        assert report.signals["date_corroboration.invoice_date"] == 1.0
+
+    def test_a_shifted_invoice_date_is_now_caught(self):
+        # 13 days earlier — squarely inside the injected corruption's range.
+        shifted = make_invoice(invoice_date="2026-01-04")
+        report = score_extraction(shifted, validate_invoice(shifted), source_text=self.SOURCE)
+        assert report.doc_confidence < 1.0
+        assert report.fields["invoice_date"].confidence < 1.0
+        assert any(r.startswith("uncorroborated_date") for r in report.reasons)
+
+    def test_the_shift_is_invisible_without_the_source_text(self):
+        # Documents precisely what the signal buys: identical input, no text.
+        shifted = make_invoice(invoice_date="2026-01-04")
+        assert score_extraction(shifted, validate_invoice(shifted)).doc_confidence == 1.0
+
+    def test_every_validation_rule_still_passes_on_the_shifted_date(self):
+        # i.e. the arithmetic/date rules genuinely cannot see this error
+        shifted = make_invoice(invoice_date="2026-01-04")
+        assert all(validate_invoice(shifted).values())
+
+    def test_correct_dates_are_not_penalized_when_the_page_has_no_dates(self):
+        report = score_extraction(
+            make_invoice(), validate_invoice(make_invoice()), source_text=self.NO_DATES
+        )
+        assert report.doc_confidence == 1.0
+        assert report.signals["date_corroboration.text_dates_found"] == 0
+
+    def test_stated_payment_term_is_corroborated(self):
+        source = self.SOURCE + "Zahlbar innerhalb von 30 Tagen ohne Abzug.\n"
+        report = score_extraction(
+            make_invoice(), validate_invoice(make_invoice()), source_text=source
+        )
+        assert report.signals["date_corroboration.payment_term"] == 1.0
+
+    def test_signal_is_continuous_for_the_calibration_fit(self):
+        near = score_extraction(
+            make_invoice(invoice_date="2026-01-16"),
+            validate_invoice(make_invoice(invoice_date="2026-01-16")),
+            source_text=self.SOURCE,
+        ).signals["date_corroboration.invoice_date"]
+        far = score_extraction(
+            make_invoice(invoice_date="2026-01-01"),
+            validate_invoice(make_invoice(invoice_date="2026-01-01")),
+            source_text=self.SOURCE,
+        ).signals["date_corroboration.invoice_date"]
+        assert 0.0 < far < near < 1.0

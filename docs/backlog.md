@@ -44,6 +44,24 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **No CI workflow yet.** `make test` and `make lint` are CI-ready and green;
   wiring GitHub Actions is a later phase.
 
+## From Phase 2.3a
+
+- **The operating-point rule picks a threshold that lets arithmetic errors
+  through.** "Maximise coverage subject to precision >= 99%" selects 0.42,
+  which sits *below* the score band of fields with one failed validation rule,
+  so 4 `arithmetic_drift` totals are auto-approved. The same v2 model at 0.67
+  yields 3 survivors and 99.57% precision for 1.4pp less coverage. Consider
+  changing the selection rule to "highest precision within 2pp of max
+  coverage", or simply operate at 0.67 — a one-line config change.
+- **Coverage is less discrete but still bounded below.** Distinct selectable
+  coverage levels went 7 -> 14 and distinct scores 6 -> 15, because the
+  1/(1+days) date distance is continuous on *erroneous* documents. Clean
+  documents still cluster at one score, so the gap between 0% and ~93%
+  coverage remains: fine control exists only inside the 93-97% band.
+- **Truncated/casing vendor errors are the new residual.** With dates handled,
+  2 of the 3 survivors at threshold 0.67 are vendor errors that token-shape
+  and groundedness both miss.
+
 ## From Phase 2.2c
 
 - **99% auto-approve precision is unreachable, and the cause is one error
