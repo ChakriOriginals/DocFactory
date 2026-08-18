@@ -1,6 +1,6 @@
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
 
-.PHONY: setup up down seed test lint fmt eval migrate calibrate calibrate-fit
+.PHONY: setup up down seed test lint fmt eval eval-gate costs migrate calibrate calibrate-fit
 
 .env:
 	cp .env.example .env
@@ -61,6 +61,11 @@ eval: .env
 ## Unit-cost rollup from recorded usage events (what the worker actually spent).
 costs: .env
 	uv run python -m docfactory_evals.costs
+
+## The CI gate: re-run the golden sets and fail if any type drops below its
+## floor in config/eval_thresholds.json. Mock mode only — free and deterministic.
+eval-gate: .env
+	uv run python -m docfactory_evals.gate
 
 migrate: .env
 	uv run alembic upgrade head

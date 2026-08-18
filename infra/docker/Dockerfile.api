@@ -1,0 +1,56 @@
+# API image.
+#
+# One image serves two jobs: the API service, and the one-off migration task
+# (which overrides the command to `alembic upgrade head`). They share a
+# codebase and their dependency sets are near-identical, so a second image
+# would be two things to build, push and keep in step for no benefit.
+#
+# The heavyweight dev groups — WeasyPrint and friends for the synthetic corpus,
+# numpy/matplotlib for the calibration study — are deliberately NOT installed:
+# they are dev tooling, and shipping them would triple the image for code that
+# never runs in production.
+
+FROM python:3.12-slim-bookworm AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+
+WORKDIR /app
+
+# Dependencies first, as their own layer: application code changes on every
+# commit, the lockfile rarely, and CI rebuilds on every push. No BuildKit cache
+# mounts — this way the image builds under any builder, and CI gets its layer
+# caching from the registry instead (cache-from/cache-to in the build action).
+COPY pyproject.toml uv.lock ./
+COPY packages/core/pyproject.toml packages/core/
+COPY packages/evals/pyproject.toml packages/evals/
+COPY apps/api/pyproject.toml apps/api/
+COPY apps/worker/pyproject.toml apps/worker/
+
+RUN uv sync --frozen --no-install-workspace --package docfactory-api
+
+COPY alembic.ini ./
+COPY alembic/ alembic/
+COPY config/ config/
+COPY packages/ packages/
+COPY apps/ apps/
+
+RUN uv sync --frozen --package docfactory-api
+
+ENV PATH="/app/.venv/bin:${PATH}"
+
+# Non-root: the task role is the security boundary that matters, but a
+# container that runs as root for no reason is a finding waiting to happen.
+RUN useradd --create-home --uid 10001 docfactory && chown -R docfactory:docfactory /app
+USER docfactory
+
+EXPOSE 8000
+
+# One worker process per task; ECS scales tasks, not processes — that way the
+# unit of scaling is the same unit CloudWatch measures.
+CMD ["uvicorn", "docfactory_api.main:app", "--host", "0.0.0.0", "--port", "8000"]

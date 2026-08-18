@@ -1,0 +1,208 @@
+name: test → eval gate → build → deploy
+
+# The order is the point. Tests prove the code works; the eval gate proves the
+# *pipeline* still extracts as well as it did; only then is an image built and
+# rolled out. A pull request runs everything up to the gate — enough to block a
+# merge that degrades quality — and deploys nothing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC: GitHub mints the token AWS trusts
+
+env:
+  AWS_REGION: us-east-1
+  # Mock is the deployed default. A real-model run is a deliberate, temporary
+  # change made by hand — never the state the stack sits in.
+  MODEL_PROVIDER: mock
+
+jobs:
+  test:
+    name: tests + lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: docfactory
+          POSTGRES_PASSWORD: docfactory
+          POSTGRES_DB: docfactory
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - run: uv sync --all-packages --all-groups
+
+      - name: Lint
+        # Format check before the lint check: formatting introduces violations
+        # a prior check cannot see.
+        run: |
+          uv run ruff format --check .
+          uv run ruff check .
+
+      - name: Migrate
+        env:
+          DATABASE_ADMIN_URL: postgresql+psycopg://docfactory:docfactory@localhost:5432/docfactory
+          DATABASE_URL: postgresql+psycopg://docfactory_app:docfactory_app@localhost:5432/docfactory
+        run: uv run alembic upgrade head
+
+      - name: Tests
+        env:
+          DATABASE_URL: postgresql+psycopg://docfactory_app:docfactory_app@localhost:5432/docfactory
+          DATABASE_ADMIN_URL: postgresql+psycopg://docfactory:docfactory@localhost:5432/docfactory
+        # Integration tests skip themselves without MinIO/ElasticMQ; the unit
+        # and isolation suites still run against the real Postgres above,
+        # which is what keeps the RLS assertions honest in CI.
+        run: uv run pytest -q
+
+  eval-gate:
+    name: eval gate (golden sets)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: System deps for the corpus generator
+        # WeasyPrint renders the synthetic PDFs. Only the gate needs this;
+        # the shipped images do not include it.
+        run: sudo apt-get update && sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0
+
+      - run: uv sync --all-packages --all-groups
+
+      # The golden split is sha256(doc_id) over the whole corpus, so the corpus
+      # must be exactly the one the thresholds were measured against — same
+      # counts, same seed. It is deterministic, so caching it is safe.
+      - name: Restore corpus
+        id: corpus
+        uses: actions/cache@v4
+        with:
+          path: data/synth/out
+          key: corpus-${{ hashFiles('data/synth/**.py', 'data/synth/templates/**', 'config/eval_thresholds.json') }}
+
+      - name: Generate corpus
+        if: steps.corpus.outputs.cache-hit != 'true'
+        run: |
+          uv run python data/synth/generate.py --type invoice --count 500
+          uv run python data/synth/generate.py --type purchase_order --count 120
+
+      - name: Eval gate
+        # Fails the build when either golden set drops below its floor.
+        # This is the step that blocks a merge.
+        run: uv run python -m docfactory_evals.gate
+
+      - name: Publish the numbers
+        if: always()
+        run: uv run python -m docfactory_evals.run --out eval_results.md || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: eval_results.md
+
+  build-and-deploy:
+    name: build → push → deploy
+    runs-on: ubuntu-latest
+    needs: eval-gate
+    # Pull requests stop at the gate. Only main deploys.
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume the deploy role (OIDC — no stored AWS keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          for service in api worker; do
+            image="$REGISTRY/docfactory-dev-$service:$TAG"
+            docker build -f "infra/docker/Dockerfile.$service" -t "$image" .
+            docker push "$image"
+          done
+
+      - name: Migrate (owner role, before the services roll)
+        env:
+          CLUSTER: docfactory-dev
+        run: |
+          # Migrations run as a one-off task using the OWNER credentials. The
+          # app tasks connect as docfactory_app and hold no DDL rights, so this
+          # is the only place schema changes can happen.
+          subnets=$(aws ec2 describe-subnets \
+            --filters "Name=tag:Name,Values=docfactory-dev-public-*" \
+            --query 'Subnets[].SubnetId' --output text | tr '\t' ',')
+          group=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=docfactory-dev-worker" \
+            --query 'SecurityGroups[0].GroupId' --output text)
+
+          task=$(aws ecs run-task --cluster "$CLUSTER" \
+            --task-definition docfactory-dev-migrate --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$group],assignPublicIp=ENABLED}" \
+            --query 'tasks[0].taskArn' --output text)
+
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$task"
+          code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          echo "migration exit code: $code"
+          [ "$code" = "0" ] || { echo "migration failed — not deploying"; exit 1; }
+
+      - name: Roll the services
+        env:
+          CLUSTER: docfactory-dev
+          TAG: ${{ github.sha }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          for service in api worker; do
+            family="docfactory-dev-$service"
+            current=$(aws ecs describe-task-definition --task-definition "$family" \
+              --query 'taskDefinition' --output json)
+            updated=$(echo "$current" | python3 -c "
+          import json, os, sys
+          td = json.load(sys.stdin)
+          image = f\"{os.environ['REGISTRY']}/docfactory-dev-{os.environ['SERVICE']}:{os.environ['TAG']}\"
+          td['containerDefinitions'][0]['image'] = image
+          for key in ('taskDefinitionArn','revision','status','requiresAttributes',
+                      'compatibilities','registeredAt','registeredBy'):
+              td.pop(key, None)
+          json.dump(td, sys.stdout)
+          " )
+            export SERVICE=$service
+            arn=$(aws ecs register-task-definition --cli-input-json "$updated" \
+              --query 'taskDefinition.taskDefinitionArn' --output text)
+            aws ecs update-service --cluster "$CLUSTER" --service "$family" \
+              --task-definition "$arn" >/dev/null
+            echo "$family -> $arn"
+          done
+
+      - name: Wait for the API to stabilise
+        run: |
+          aws ecs wait services-stable --cluster docfactory-dev --services docfactory-dev-api
+          echo "deployed"

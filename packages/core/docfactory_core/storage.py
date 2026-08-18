@@ -51,6 +51,22 @@ class ObjectStore:
             self._s3.create_bucket(**params)
             log.info("created bucket", extra={"bucket": self.bucket})
 
+    def assert_bucket(self) -> None:
+        """Verify the bucket exists. Never create it.
+
+        The deployed task role can read and write objects and nothing else —
+        it cannot create a bucket, and should not be able to. A missing bucket
+        here is a deployment error to surface, not a gap to paper over.
+        """
+        try:
+            self._s3.head_bucket(Bucket=self.bucket)
+        except ClientError as exc:
+            raise RuntimeError(
+                f"bucket {self.bucket!r} is missing or unreadable by this role "
+                f"({exc}). Infrastructure is managed by Terraform in this "
+                "environment; the application does not create it."
+            ) from exc
+
     def ensure_bucket_notifications(self, target_arn: str, prefix_suffix: str = "") -> bool:
         """Point object-created events at a notification target.
 

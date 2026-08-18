@@ -1,0 +1,27 @@
+# Copy to terraform.tfvars and edit. Never commit terraform.tfvars — the Neon
+# URLs are credentials. They are passed to Secrets Manager at apply time and
+# read by the tasks at runtime; nothing sensitive ends up in a task definition.
+
+aws_region  = "us-east-1"
+environment = "dev"
+owner       = "your-name"
+
+# Compute. worker_min_count = 0 means an idle stack runs no workers at all.
+api_desired_count = 1
+worker_min_count  = 0
+worker_max_count  = 6
+
+# The deployed default. Flip to "anthropic" only for a deliberate short run.
+model_provider = "mock"
+
+# Set once a GitHub repository exists; empty skips the OIDC role entirely.
+github_repository = "" # "your-user/DocFactory"
+
+# Guard rail: leave false so `terraform destroy` refuses to delete documents.
+force_destroy_documents = false
+
+# Prefer environment variables for these two:
+#   export TF_VAR_neon_database_url_owner=...
+#   export TF_VAR_neon_database_url_app=...
+# neon_database_url_owner = ""
+# neon_database_url_app   = ""

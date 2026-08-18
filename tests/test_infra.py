@@ -85,3 +85,105 @@ def test_queue_send_receive_roundtrip():
     finally:
         broker._sqs.delete_queue(QueueUrl=url)
         broker._sqs.delete_queue(QueueUrl=broker.queue_url(dlq_name(queue)))
+
+
+class TestInfraOwnership:
+    """Who is allowed to create the bucket and the queues.
+
+    Locally the app creates them, because compose brings up empty backends and
+    nothing else will. On AWS Terraform owns them and the task roles have no
+    CreateQueue/CreateBucket rights at all — so the app must verify rather than
+    create, and fail loudly when something is missing instead of retrying a
+    call it will never be permitted to make.
+    """
+
+    def test_auto_asserts_when_no_endpoint_overrides_are_set(self, monkeypatch):
+        """No endpoints set means real AWS, which means Terraform owns it."""
+        from docfactory_core import bootstrap
+
+        monkeypatch.setattr(
+            bootstrap, "get_settings", lambda: _settings(s3=None, sqs=None, mode="auto")
+        )
+        calls = _record_calls(monkeypatch, bootstrap)
+        bootstrap.ensure_infra(attempts=1)
+        assert calls == ["assert_bucket", "assert_queues"]
+
+    def test_auto_creates_when_pointed_at_local_backends(self, monkeypatch):
+        from docfactory_core import bootstrap
+
+        monkeypatch.setattr(
+            bootstrap,
+            "get_settings",
+            lambda: _settings(s3="http://localhost:9000", sqs="http://localhost:9324"),
+        )
+        calls = _record_calls(monkeypatch, bootstrap)
+        bootstrap.ensure_infra(attempts=1)
+        assert calls == ["ensure_bucket", "ensure_queues"]
+
+    def test_assert_mode_is_honoured_even_against_local_endpoints(self, monkeypatch):
+        """An explicit setting beats inference: useful for testing the AWS path."""
+        from docfactory_core import bootstrap
+
+        monkeypatch.setattr(
+            bootstrap,
+            "get_settings",
+            lambda: _settings(s3="http://localhost:9000", sqs="http://x", mode="assert"),
+        )
+        calls = _record_calls(monkeypatch, bootstrap)
+        bootstrap.ensure_infra(attempts=1)
+        assert calls == ["assert_bucket", "assert_queues"]
+
+    def test_a_missing_queue_fails_with_an_actionable_message(self):
+        """The deployed failure mode: Terraform did not run, or the role is wrong."""
+        from botocore.exceptions import ClientError
+        from docfactory_core.queues import QueueBroker
+
+        broker = QueueBroker.__new__(QueueBroker)
+        broker._settings = _settings(s3=None, sqs=None)
+        broker._urls = {}
+
+        def missing(name):
+            raise ClientError(
+                {"Error": {"Code": "AWS.SimpleQueueService.NonExistentQueue"}}, "GetQueueUrl"
+            )
+
+        broker.queue_url = missing
+        with pytest.raises(RuntimeError, match="managed by Terraform"):
+            broker.assert_queues()
+
+
+def _settings(*, s3, sqs, mode="auto"):
+    from docfactory_core.config import Settings
+
+    return Settings(
+        s3_endpoint_url=s3,
+        sqs_endpoint_url=sqs,
+        infra_mode=mode,
+        ingest_notify_target="",
+    )
+
+
+def _record_calls(monkeypatch, bootstrap):
+    """Swap the clients for recorders so no backend is touched."""
+    calls: list[str] = []
+
+    class FakeStore:
+        def assert_bucket(self):
+            calls.append("assert_bucket")
+
+        def ensure_bucket(self):
+            calls.append("ensure_bucket")
+
+        def ensure_bucket_notifications(self, *args, **kwargs):
+            calls.append("notifications")
+
+    class FakeBroker:
+        def assert_queues(self):
+            calls.append("assert_queues")
+
+        def ensure_queues(self):
+            calls.append("ensure_queues")
+
+    monkeypatch.setattr(bootstrap, "ObjectStore", FakeStore)
+    monkeypatch.setattr(bootstrap, "QueueBroker", FakeBroker)
+    return calls

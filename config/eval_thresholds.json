@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "note": "Floors the CI eval gate enforces per document type. A PR that drops a golden-set number below these does not merge. Set from measured baselines with a little headroom, not aspirationally: a gate that fails on noise gets disabled, and a disabled gate guards nothing.",
+  "corpus": {
+    "note": "The numbers below are only comparable against this corpus. The golden split is sha256(doc_id) over all documents of a type, so changing the count changes WHICH documents are graded — CI must generate exactly these.",
+    "invoice": { "count": 500, "seed": 1337 },
+    "purchase_order": { "count": 120, "seed": 1337 }
+  },
+  "thresholds": {
+    "invoice": {
+      "min_overall": 97.5,
+      "min_overall_routed": 97.0,
+      "min_fields": {
+        "subtotal": 99.0,
+        "tax": 99.0,
+        "total": 99.0,
+        "line_items": 99.0
+      },
+      "baseline_note": "Measured 97.8% single-model / 97.7% routed since Phase 3c. The euro vendor sits at 11.1% by construction (small-caps text-extraction artifact, documented in the backlog) and is deliberately not floored — flooring a known-broken field would mean either a permanently red gate or a meaningless threshold."
+    },
+    "purchase_order": {
+      "min_overall": 99.5,
+      "min_overall_routed": 99.5,
+      "min_fields": {
+        "subtotal": 99.0,
+        "shipping": 99.0,
+        "total": 99.0,
+        "line_items": 99.0
+      },
+      "baseline_note": "Measured 100% on both passes since Phase 3c."
+    }
+  }
+}

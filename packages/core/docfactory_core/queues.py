@@ -63,6 +63,30 @@ class QueueBroker:
             )
             log.info("queue ready", extra={"queue": logical, "dlq": dlq_name(logical)})
 
+    def assert_queues(self) -> None:
+        """Verify every queue exists. Never create one.
+
+        `create_queue` is idempotent, but it still needs sqs:CreateQueue — a
+        permission the deployed task roles deliberately do not have. Asserting
+        turns "the task cannot create infrastructure" from a hope into a
+        startup check with a clear message.
+        """
+        for logical in (
+            self._settings.parse_queue,
+            self._settings.extract_queue,
+            self._settings.ingest_queue,
+        ):
+            for name in (logical, dlq_name(logical)):
+                try:
+                    self.queue_url(name)
+                except ClientError as exc:
+                    raise RuntimeError(
+                        f"queue {name!r} is missing or unreadable by this role ({exc}). "
+                        "Infrastructure is managed by Terraform in this environment; "
+                        "the application does not create it."
+                    ) from exc
+            log.info("queue verified", extra={"queue": logical, "dlq": dlq_name(logical)})
+
     def ensure_queue_pair(
         self, logical: str, *, visibility_timeout: str, max_receive_count: int
     ) -> str:

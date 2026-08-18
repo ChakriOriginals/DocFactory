@@ -84,6 +84,30 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **README still describes Phase 0.** It predates every phase since; the
   quickstart commands work but the state description does not.
 
+## From Phase 4c
+
+- **The Terraform has never been applied.** It validates and is formatted, but
+  no AWS account was reachable when it was written, so every cost figure in
+  the runbook is a rate card number and the destroy round trip is a documented
+  procedure rather than an observation. The first apply is the test; expect to
+  find IAM permissions that are a shade too narrow.
+- **No TLS on the demo URL.** The ALB listener is HTTP because the stack has no
+  domain and therefore no ACM certificate. Fine for a mock-mode demo, not for
+  anything carrying a real document.
+- **Terraform state is local by default.** A commented S3 backend block is
+  ready; CI deploys need it, because state in a runner is state you have lost.
+- **The API blocks startup on infra verification.** `ensure_infra` retries for
+  up to 30 seconds before the app serves `/healthz`. The ECS health-check grace
+  period covers it, but a genuinely missing queue means a task that never
+  becomes healthy and is replaced forever — loud, but a crash loop rather than
+  a clear message in one place.
+- **`ecs.tf` hardcodes container names in the CI roll step.** The deploy job
+  patches `containerDefinitions[0]`, which is correct for single-container
+  tasks and would silently patch the wrong one if a sidecar were added.
+- **Autoscaling steps are guesses.** 1/3/max at 1/20/100 messages is a shape,
+  not a measurement — nothing has been load-tested. Phase 5 replaces the
+  numbers with observed throughput.
+
 ## From Phase 4b
 
 - **The local storage-event bridge is not the AWS path.** MinIO cannot publish

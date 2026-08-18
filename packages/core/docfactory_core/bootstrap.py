@@ -1,8 +1,16 @@
-"""Infra bootstrap: make the bucket and queues exist.
+"""Infra bootstrap: make the bucket and queues exist — or check that they do.
 
 Called on service startup (api/worker) and by ``make up``. Idempotent. Retries
 briefly because a container reporting healthy can precede its endpoint
 accepting requests by a moment.
+
+Two modes, because who owns the infrastructure differs by environment. Locally,
+compose brings up empty MinIO and ElasticMQ and something has to create the
+bucket and queues, so the app does. On AWS, Terraform owns them and the task
+roles are scoped to using them — no CreateQueue, no CreateBucket. There the app
+*asserts* instead: it verifies what it needs and fails loudly and immediately
+if something is missing, rather than retrying a call it will never be allowed
+to make.
 """
 
 import logging
@@ -22,14 +30,24 @@ def ensure_infra(attempts: int = 30, delay: float = 1.0) -> None:
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
+            settings = get_settings()
+            managed_externally = settings.infra_mode == "assert" or (
+                settings.infra_mode == "auto"
+                and not settings.s3_endpoint_url
+                and not settings.sqs_endpoint_url
+            )
             store = ObjectStore()
+            if managed_externally:
+                store.assert_bucket()
+                QueueBroker().assert_queues()
+                log.info("infrastructure verified (managed externally)")
+                return
             store.ensure_bucket()
             QueueBroker().ensure_queues()
             # Batch ingestion: object-created events under a tenant's drop
             # prefix start the pipeline without an API call. Best-effort —
             # a backend with no notification target configured is not an
             # error, it just means only the API path is live.
-            settings = get_settings()
             if settings.s3_endpoint_url and settings.ingest_notify_target:
                 store.ensure_bucket_notifications(settings.ingest_notify_target)
             log.info("infrastructure ready")

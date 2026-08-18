@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     s3_secret_key: str = "minioadmin"
     s3_bucket: str = "docfactory"
 
+    # Who owns the bucket and the queues.
+    #
+    # "ensure"  create them if missing — right for local dev, where compose
+    #           brings up empty MinIO/ElasticMQ and nothing else will.
+    # "assert"  verify they exist and fail loudly if not — right for AWS,
+    #           where Terraform owns them and the task role deliberately has
+    #           no CreateQueue/CreateBucket rights. Creating infrastructure is
+    #           not something an application task should be able to do.
+    # "auto"    assert when no endpoint overrides are set (i.e. real AWS),
+    #           ensure otherwise (i.e. local compose).
+    infra_mode: Literal["auto", "ensure", "assert"] = "auto"
+
     # Queues (SQS API; ElasticMQ locally)
     sqs_endpoint_url: str | None = None
     parse_queue: str = "docfactory-parse"
