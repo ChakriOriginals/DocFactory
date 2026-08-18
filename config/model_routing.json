@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "note": "Which concrete model serves each tier, per provider. A pipeline names tiers, never model ids, so switching the small tier to a different model is a config edit here and nothing else changes.",
+  "tiers": {
+    "mock": {
+      "small": "mock-extractor-small-v1",
+      "frontier": "mock-extractor-v1"
+    },
+    "anthropic": {
+      "small": "claude-haiku-4-5",
+      "frontier": "claude-opus-5"
+    }
+  },
+  "default_policy": {
+    "primary_tier": "frontier",
+    "escalate_to": null,
+    "escalate_on": []
+  }
+}

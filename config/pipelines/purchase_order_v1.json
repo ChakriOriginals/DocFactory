@@ -220,5 +220,14 @@
       }
     }
   },
+  "model_routing": {
+    "primary_tier": "small",
+    "escalate_to": "frontier",
+    "escalate_on": [
+      "validation_failed",
+      "needs_review",
+      "extraction_failed"
+    ]
+  },
   "sla_hours": 48
 }

@@ -49,11 +49,18 @@ class LLMClient(Protocol):
     ) -> LLMResponse: ...
 
 
-def get_llm_client(settings: Settings | None = None) -> "MockLLMClient | AnthropicLLMClient":
+def get_llm_client(
+    settings: Settings | None = None, model: str | None = None
+) -> "MockLLMClient | AnthropicLLMClient":
+    """A client for a specific model, or the deployment default.
+
+    Routing picks the model id from the pipeline's tier; everything else in the
+    system keeps talking to one interface.
+    """
     settings = settings or get_settings()
     if settings.model_provider == "anthropic":
-        return AnthropicLLMClient(settings)
-    return MockLLMClient()
+        return AnthropicLLMClient(settings, model=model)
+    return MockLLMClient(model=model)
 
 
 class AnthropicLLMClient:
@@ -63,10 +70,10 @@ class AnthropicLLMClient:
 
     provider = "anthropic"
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, model: str | None = None) -> None:
         import anthropic
 
-        self.model = settings.anthropic_model
+        self.model = model or settings.anthropic_model
         self._settings = settings
         # Explicit key if configured; otherwise the SDK's own resolution
         # (env var / `ant auth login` profile).
@@ -119,10 +126,30 @@ _RATE = re.compile(r"([\d.,]+)\s*%")
 _INT_TOKEN = re.compile(r"^\d+$")
 
 HINTS_DIR = Path(__file__).resolve().parents[3] / "config" / "mock_extraction"
+MODELS_PATH = Path(__file__).resolve().parents[3] / "config" / "mock_models.json"
+
+DEFAULT_MOCK_MODEL = "mock-extractor-v1"
 
 
 class MockHintsError(RuntimeError):
     """No mock reading hints for a pipeline — the mock cannot fake that type."""
+
+
+@lru_cache
+def load_profile(model: str) -> dict:
+    """How this mock model behaves.
+
+    The tiers differ in quality as well as price — a mock whose cheap tier is
+    exactly as good as its expensive one makes routing unmeasurable. The
+    degradations are simulated and declared in config/mock_models.json.
+    """
+    profiles = json.loads(MODELS_PATH.read_text())["models"]
+    try:
+        return profiles[model]
+    except KeyError as exc:
+        raise MockHintsError(
+            f"no mock behaviour profile for {model!r}; known: {sorted(profiles)}"
+        ) from exc
 
 
 @lru_cache
@@ -140,10 +167,11 @@ def load_hints(slug: str, version: int = 1) -> dict:
 
 class MockLLMClient:
     provider = "mock"
-    model = "mock-extractor-v1"
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, model: str | None = None) -> None:
         settings = settings or get_settings()
+        self.model = model or DEFAULT_MOCK_MODEL
+        self._profile = load_profile(self.model)
         self._corruption_rate = settings.mock_corruption_rate
         self._corruption_seed = settings.mock_corruption_seed
 
@@ -161,7 +189,9 @@ class MockLLMClient:
 
             definition = default_pipeline()
         text = self._document_text(messages)
-        payload = heuristic_extract(text, load_hints(definition.slug, definition.version))
+        payload = heuristic_extract(
+            text, load_hints(definition.slug, definition.version), self._profile
+        )
         # Labelled error injection for the calibration study. Off unless
         # MOCK_CORRUPTION_RATE is set; deterministic in (seed, document) so a
         # study re-run reproduces the same corpus and can recompute the label
@@ -170,11 +200,17 @@ class MockLLMClient:
             plan = plan_corruption(text, rate=self._corruption_rate, seed=self._corruption_seed)
             payload = apply_corruption(payload, plan, seed=self._corruption_seed)
         content = json.dumps(payload, ensure_ascii=False)
+        # Token counts cover the whole prompt — system instructions and schema
+        # included — not just the document, so a mock-mode cost number reflects
+        # what the pipeline actually sends. Four characters per token is the
+        # standard approximation; a real run replaces it with the provider's
+        # own count.
+        prompt = system + "".join(str(message.get("content", "")) for message in messages)
         return LLMResponse(
             content=content,
             model=self.model,
             stop_reason="end_turn",
-            input_tokens=len(text) // 4,
+            input_tokens=len(prompt) // 4 + len(json.dumps(output_schema or {})) // 4,
             output_tokens=len(content) // 4,
         )
 
@@ -186,9 +222,17 @@ class MockLLMClient:
         return str(messages[-1].get("content", ""))
 
 
-def heuristic_extract(text: str, hints: dict) -> dict:
-    """Read a document the way a cheap extractor would, guided by hints."""
-    lines = _rejoin_smallcaps([line.strip() for line in text.splitlines() if line.strip()])
+def heuristic_extract(text: str, hints: dict, profile: dict | None = None) -> dict:
+    """Read a document the way an extractor of this tier would.
+
+    `hints` say how the document type prints its fields; `profile` says how
+    capable this model is at reading them.
+    """
+    profile = profile or load_profile(DEFAULT_MOCK_MODEL)
+    repairs = frozenset(profile.get("repairs", ()))
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if "smallcaps" in repairs:
+        lines = _rejoin_smallcaps(lines)
     currency = "EUR" if "\u20ac" in text else "USD"
     money_re = _EU_MONEY if currency == "EUR" else _US_MONEY
 
@@ -201,7 +245,7 @@ def heuristic_extract(text: str, hints: dict) -> dict:
         record[name] = match.group(0) if match else "UNKNOWN"
 
     for name, rules in hints.get("heading_fields", {}).items():
-        record[name] = _heading_value(lines, rules)
+        record[name] = _heading_value(lines, rules, trim_logo="logo_initial" in repairs)
 
     for name, rules in hints.get("labeled_fields", {}).items():
         record[name] = _labeled_value(lines, rules)
@@ -222,13 +266,20 @@ def heuristic_extract(text: str, hints: dict) -> dict:
     rows: list[dict] = []
     if table:
         rows = _table_rows(lines, money_re, currency, table)
+        # A weaker model loses rows off the end of a long table. Simulated, and
+        # chosen because it breaks the sum-to-subtotal rule — a failure the
+        # router can see and act on.
+        limit = profile.get("max_table_rows")
+        if limit:
+            rows = rows[:limit]
         record[table["field"]] = rows or [dict(table["empty_row"])]
 
     for name, keys in hints.get("labeled_amounts", {}).items():
         record[name] = _labeled_amount(lines, tuple(keys), money_re)
-    for name, fallback in hints.get("amount_fallbacks", {}).items():
-        if record.get(name) is None:
-            record[name] = _fallback_amount(fallback, record, rows)
+    if "amount_fallbacks" in repairs:
+        for name, fallback in hints.get("amount_fallbacks", {}).items():
+            if record.get(name) is None:
+                record[name] = _fallback_amount(fallback, record, rows)
     for name in hints.get("labeled_amounts", {}):
         if record.get(name) is None:
             record[name] = "0"
@@ -266,7 +317,7 @@ def _rejoin_smallcaps(lines: list[str]) -> list[str]:
     return joined
 
 
-def _heading_value(lines: list[str], rules: dict) -> str:
+def _heading_value(lines: list[str], rules: dict, *, trim_logo: bool = True) -> str:
     """The first line that reads like a name rather than a label or a title."""
     skip_prefixes = tuple(rules.get("skip_prefixes", ()))
     title_words = {word.upper() for word in rules.get("title_words", ())}
@@ -278,7 +329,7 @@ def _heading_value(lines: list[str], rules: dict) -> str:
             continue
         # modern layout glues the logo initial on: "Fernandez-Harris F"
         tokens = line.split()
-        if len(tokens) > 1 and len(tokens[-1]) == 1 and tokens[-1] == line[0]:
+        if trim_logo and len(tokens) > 1 and len(tokens[-1]) == 1 and tokens[-1] == line[0]:
             tokens = tokens[:-1]
         return " ".join(tokens)
     return "UNKNOWN"

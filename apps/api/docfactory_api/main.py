@@ -19,9 +19,11 @@ from typing import BinaryIO, Literal
 
 from docfactory_core.auth import AuthError, resolve_tenant
 from docfactory_core.bootstrap import ensure_infra
+from docfactory_core.budget import budget_state
 from docfactory_core.config import get_settings
 from docfactory_core.db import current_tenant, session_scope
 from docfactory_core.logging import configure_logging, document_id_var
+from docfactory_core.metering import unit_costs
 from docfactory_core.models import (
     Document,
     DocumentStatus,
@@ -121,6 +123,27 @@ class DocumentView(BaseModel):
     parsed_at: datetime | None
     extracted_at: datetime | None
     extraction: ExtractionView | None
+
+
+class UsageRollup(BaseModel):
+    """What a document type costs to process, from recorded usage."""
+
+    pipeline_slug: str
+    documents: int
+    calls: int
+    cost_usd: float
+    cost_per_document_usd: float
+    escalation_rate: float
+    cost_by_tier_usd: dict[str, float]
+
+
+class SpendSummary(BaseModel):
+    tenant_id: str
+    spent_usd: float
+    budget_usd: float
+    remaining_usd: float
+    exceeded: bool
+    unit_costs: list[UsageRollup]
 
 
 class ReviewTaskSummary(BaseModel):
@@ -239,6 +262,37 @@ def upload_document(
         )
         log.info("document received", extra={"sha256": sha256, "bytes": size})
         return UploadResponse(document_id=document.id, status=DocumentStatus.RECEIVED)
+
+
+@app.get("/usage", response_model=SpendSummary)
+def get_usage() -> SpendSummary:
+    """This tenant's spend and its unit cost per document type.
+
+    Both come from recorded usage: the counter the budget cap is enforced
+    against, and the per-call `usage_events` rows behind it. RLS scopes every
+    row to the calling tenant, so there is no tenant filter in the queries.
+    """
+    tenant_id = current_tenant.get()
+    state = budget_state(tenant_id)
+    return SpendSummary(
+        tenant_id=tenant_id,
+        spent_usd=float(state.spent_usd),
+        budget_usd=float(state.budget_usd),
+        remaining_usd=float(state.remaining_usd),
+        exceeded=state.exceeded,
+        unit_costs=[
+            UsageRollup(
+                pipeline_slug=row.pipeline_slug,
+                documents=row.documents,
+                calls=row.calls,
+                cost_usd=float(row.cost_usd),
+                cost_per_document_usd=float(row.cost_per_document),
+                escalation_rate=round(row.escalation_rate, 4),
+                cost_by_tier_usd={tier: float(cost) for tier, cost in row.by_tier.items()},
+            )
+            for row in unit_costs(tenant_id)
+        ],
+    )
 
 
 @app.get("/documents/{document_id}", response_model=DocumentView)

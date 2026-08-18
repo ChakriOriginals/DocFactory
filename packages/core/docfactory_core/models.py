@@ -267,6 +267,74 @@ class ExtractionField(ColumnsMixin, Base):
     )
 
 
+class UsageEvent(ColumnsMixin, Base):
+    """One metered model call.
+
+    The audit trail behind every cost number: what was spent, on which model
+    and tier, for which document and pipeline, and why the call happened (the
+    first extraction, or an escalation to a stronger model). Token counts come
+    from the provider's own usage report; `cost_usd` is those tokens priced by
+    `config/model_pricing.json`.
+
+    Kept separate from `extractions` because one extraction can involve more
+    than one call — routing escalates — and because a call that produced no
+    usable extraction still cost money.
+    """
+
+    __tablename__ = "usage_events"
+
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # SET NULL, never CASCADE: deleting a document must not delete the record
+    # that money was spent on it. The link is expendable; the spend is not.
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL")
+    )
+    extraction_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("extractions.id", ondelete="SET NULL")
+    )
+    pipeline_slug: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(Text, nullable=False)  # "provider:model-id"
+    model_tier: Mapped[str] = mapped_column(Text, nullable=False)  # "small" | "frontier"
+    # Why this call happened: the first attempt, or an escalation after it.
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+
+    __table_args__ = (
+        Index("ix_usage_events_tenant_created", "tenant_id", "created_at"),
+        Index("ix_usage_events_document", "document_id"),
+    )
+
+
+class TenantSpend(Base):
+    """A tenant's running spend, as a counter rather than a query.
+
+    Summing `usage_events` gives the same number, but a cap enforced by
+    read-then-write races: two workers can both read a spend below the cap and
+    both charge. This row is the serialization point — the charge is a single
+    conditional UPDATE, so the second worker re-evaluates the cap while holding
+    the row lock and loses cleanly.
+
+    The events remain the audit trail; this is the enforcement point, and a
+    test asserts the two agree.
+    """
+
+    __tablename__ = "tenant_spend"
+
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    spent_usd: Mapped[float] = mapped_column(Numeric(14, 6), nullable=False, server_default="0")
+    # Calls charged but never settled (the worker died mid-call). Diagnostic
+    # only: the estimate stays charged, which is the safe direction.
+    unsettled_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ReviewStatus(enum.StrEnum):
     OPEN = "open"
     RESOLVED = "resolved"

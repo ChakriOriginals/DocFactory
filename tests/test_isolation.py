@@ -361,22 +361,26 @@ class TestBudgetIsolation:
 
     @pytest.fixture
     def spent_tenant(self, other_tenant):
-        """Push acme's spend past its cap by charging one very expensive call."""
+        """Push acme's spend past its cap on the counter the cap is enforced against."""
         from decimal import Decimal
 
+        from sqlalchemy import text as sql
+
         with admin_session_scope() as session:
-            tenant = session.get(Tenant, OTHER)
-            tenant.budget_usd = Decimal("0.005")  # below one call's cost
-            extraction = session.scalars(
-                select(Extraction).where(Extraction.tenant_id == OTHER)
-            ).first()
-            extraction.cost_usd = Decimal("1.00")
+            session.get(Tenant, OTHER).budget_usd = Decimal("0.005")  # below one call's cost
+            session.execute(
+                sql(
+                    "INSERT INTO tenant_spend (tenant_id, spent_usd) VALUES (:t, 1.00) "
+                    "ON CONFLICT (tenant_id) DO UPDATE SET spent_usd = 1.00"
+                ),
+                {"t": OTHER},
+            )
         yield OTHER
         with admin_session_scope() as session:
             session.get(Tenant, OTHER).budget_usd = Decimal("100")
-            row = session.scalars(select(Extraction).where(Extraction.tenant_id == OTHER)).first()
-            if row is not None:
-                row.cost_usd = None
+            session.execute(
+                sql("UPDATE tenant_spend SET spent_usd = 0 WHERE tenant_id = :t"), {"t": OTHER}
+            )
 
     def test_the_over_budget_tenant_reports_exceeded(self, spent_tenant):
         from docfactory_core.budget import budget_state
@@ -394,16 +398,22 @@ class TestBudgetIsolation:
     def test_spend_is_computed_per_tenant_not_globally(self, spent_tenant):
         from docfactory_core.budget import budget_state
 
-        # acme's $1.00 charge must not appear in dev-tenant's spend; the query
-        # has no tenant filter of its own, so this is RLS doing the work.
+        # acme's $1.00 charge must not appear in dev-tenant's spend. The
+        # counter row is tenant-scoped and under RLS, so a read bound to
+        # dev-tenant cannot see it even though both rows live in one table.
         assert budget_state("dev-tenant").spent_usd < 1
 
     def test_an_over_budget_document_pauses_instead_of_crashing(self, spent_tenant):
         """The worker records a clear state and acknowledges the message."""
-        from docfactory_core.budget import check_budget
+        from decimal import Decimal
 
-        state = check_budget(OTHER)
+        from docfactory_core.budget import budget_state, reserve
+
+        state = budget_state(OTHER)
         assert state.exceeded is True
+        # And the charge is refused rather than merely reported: the cap is
+        # enforced by the statement that would spend the money.
+        assert reserve(OTHER, Decimal("0.01")) is None
         # BUDGET_EXCEEDED is deliberately distinct from FAILED: nothing is
         # wrong with the document and it resumes when the cap is raised.
         assert DocumentStatus.BUDGET_EXCEEDED == "budget_exceeded"

@@ -57,13 +57,11 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 
 ## From Phase 3c
 
-- **The confidence model is fitted on invoices and served to every type.**
-  `PipelineDefinition.confidence_model_path` exists and is parsed, but
-  `get_confidence_model()` still loads the one path in settings. Purchase
-  orders are therefore routed by weights fitted on invoice errors. The
-  features are kind-driven so the vectors are meaningful, but the *calibration*
-  is not this type's. Wiring per-pipeline model paths is a small change; the
-  work is the study that produces a second model.
+- **Purchase orders still borrow the invoice confidence model.** Phase 4a
+  wired per-pipeline model loading and made the borrow explicit on every
+  extraction row (`confidence_calibration`), which was the correctness gap.
+  What remains is the study that fits a purchase-order model — blocked on the
+  corruption module below, and on a 120-document corpus being thin for a fit.
 - **The corruption/calibration study is invoice-only.** `ERROR_CLASS_FIELDS`
   names invoice fields (`total`, `vendor`, `invoice_date`), and
   `make calibrate` reads the invoice labels file. A per-type study needs the
@@ -86,6 +84,32 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **README still describes Phase 0.** It predates every phase since; the
   quickstart commands work but the state description does not.
 
+## From Phase 4a
+
+- **The mock's token counts are a character-count approximation.** Four
+  characters per token, applied to the real prompt and the real response. Good
+  enough to make the pipeline's *shape* (calls, prompt size, output size)
+  meterable, but the absolute unit cost will move under a real tokenizer. The
+  first `anthropic`-mode run replaces the estimate with the provider's own
+  numbers; nothing else changes, because the price and the arithmetic are
+  already real.
+- **The small tier's weakness is simulated.** `config/mock_models.json`
+  degrades the cheap mock deliberately (truncated tables, no split-run repair)
+  so routing has something to escalate. The measured escalation rate is
+  therefore a property of that simulation, not a prediction about Haiku — the
+  cost saving scales with it, and the eval reports both numbers so the
+  sensitivity is visible.
+- **A crashed worker leaves its reservation charged.** Reserve-then-settle
+  over-counts if the process dies mid-call, which is the safe direction, and
+  the row's `unsettled_calls` makes it visible. A sweeper that releases
+  reservations older than a visibility timeout would close it.
+- **Escalation is capped at one hop.** A pipeline names one `escalate_to`
+  tier and the document is re-run once. Multi-step ladders (small → mid →
+  frontier) need the policy to carry a list rather than a tier.
+- **Unit costs are per tenant, not per document type per tenant per day.**
+  The rollup groups by pipeline and tier; time-bucketing and a real dashboard
+  are Phase 5 territory.
+
 ## From Phase 3a
 
 - **The app DB role is created by a migration.** Roles are cluster-level, not
@@ -101,11 +125,6 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
   them before a tenant context exists. They are readable by the app role and
   writable only by the owner. A tenant-management API needs its own
   authorization story (admin keys), which does not exist yet.
-- **Cost is a flat per-call price.** Real token-based metering is Phase 4;
-  `cost_usd` is now populated so budget caps are enforceable and testable.
-- **Budget check is not transactional with the spend.** Two concurrent workers
-  can both pass the cap check and both charge, overshooting by one call each.
-  Acceptable at current volume; a reservation or a DB-side counter fixes it.
 - **No admin API for tenants or keys.** Tenants are seeded by migration and
   keys issued via `core.auth` from a shell. Fine while there is one tenant.
 

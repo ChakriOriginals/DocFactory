@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from docfactory_core.normalize import (
     normalize_amount,
@@ -31,6 +31,9 @@ from docfactory_core.normalize import (
     normalize_rate,
     normalize_text,
 )
+
+if TYPE_CHECKING:
+    from docfactory_core.routing import RoutingPolicy
 
 
 class FieldKind(StrEnum):
@@ -108,6 +111,9 @@ class PipelineDefinition:
     prompt_field_notes: dict[str, str] = field(default_factory=dict)
     confidence_model_path: str | None = None
     sla_hours: float | None = None
+    # Which model tier runs this document type first, and when to escalate.
+    # Tenant-authored, so it is validated on write like every other rule.
+    model_routing: "RoutingPolicy | None" = None
 
     # --- views the scorer uses instead of hardcoded field knowledge ---
 
@@ -238,7 +244,21 @@ def parse_definition(tenant_id: str, slug: str, version: int, config: dict) -> P
         prompt_field_notes=prompt_field_notes,
         confidence_model_path=config.get("confidence", {}).get("model_path"),
         sla_hours=config.get("sla_hours"),
+        model_routing=_parse_routing(config.get("model_routing")),
     )
+
+
+def _parse_routing(config: Any) -> "RoutingPolicy":
+    from docfactory_core.routing import RoutingConfigError, default_policy, parse_policy
+
+    if config is None:
+        return default_policy()
+    try:
+        return parse_policy(config)
+    except RoutingConfigError as exc:
+        # Re-raised as a pipeline config error so the API boundary rejects a
+        # bad routing policy with the same 4xx as a bad rule.
+        raise PipelineConfigError(str(exc)) from exc
 
 
 def _parse_prompt(prompt: Any, fields: dict[str, FieldSpec]) -> tuple[str, dict[str, str]]:

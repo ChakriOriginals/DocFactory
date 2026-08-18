@@ -224,6 +224,15 @@
       }
     }
   },
+  "model_routing": {
+    "primary_tier": "small",
+    "escalate_to": "frontier",
+    "escalate_on": [
+      "validation_failed",
+      "needs_review",
+      "extraction_failed"
+    ]
+  },
   "confidence": {
     "model_path": "config/confidence_model_v2.json"
   },

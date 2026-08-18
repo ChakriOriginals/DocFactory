@@ -20,9 +20,18 @@ document row.
 import functools
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 
-from docfactory_core.budget import call_cost_usd, check_budget
+from docfactory_core.budget import (
+    Reservation,
+    budget_state,
+    release,
+    reserve,
+    settle,
+    sync_tenant_status,
+)
 from docfactory_core.confidence import ConfidenceReport, failed_extraction_report, score_extraction
 from docfactory_core.confidence_model import (
     RoutingDecision,
@@ -31,8 +40,14 @@ from docfactory_core.confidence_model import (
 )
 from docfactory_core.config import get_settings
 from docfactory_core.db import current_tenant, session_scope, tenant_context
-from docfactory_core.extraction import ExtractionOutcome, run_extraction
+from docfactory_core.extraction import (
+    ExtractionOutcome,
+    build_system_prompt,
+    build_user_message,
+    run_extraction,
+)
 from docfactory_core.llm import get_llm_client
+from docfactory_core.metering import PURPOSE_ESCALATION, PURPOSE_EXTRACT, record_usage
 from docfactory_core.models import Document, DocumentStatus, Extraction, ExtractionField
 from docfactory_core.parsing import extract_pdf_text
 from docfactory_core.pipeline import (
@@ -42,8 +57,10 @@ from docfactory_core.pipeline import (
     json_record,
 )
 from docfactory_core.pipeline_registry import default_pipeline, load_from_file
+from docfactory_core.pricing import call_cost_usd, estimate_input_tokens, worst_case_cost_usd
 from docfactory_core.queues import QueueBroker
 from docfactory_core.review import ensure_review_task
+from docfactory_core.routing import default_policy, escalation_trigger, model_for_tier
 from docfactory_core.storage import ObjectStore
 from docfactory_core.tracing import extract_trace_context, inject_trace_context
 from opentelemetry import trace
@@ -176,35 +193,82 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
         definition = _definition_for(doc_type)
         span.set_attribute("pipeline.slug", definition.slug)
 
-        # Budget gate before the model call: the point is not to spend the
-        # money, so checking afterwards would be too late.
-        budget = check_budget(tenant_id)
-        if budget.exceeded:
-            with session_scope() as session:
-                document = session.get(Document, document_id, with_for_update=True)
-                document.status = DocumentStatus.BUDGET_EXCEEDED
-                document.last_error = (
-                    f"tenant budget exhausted: spent {budget.spent_usd} of {budget.budget_usd} USD"
-                )
-            span.set_attribute("outcome", "budget_exceeded")
-            log.warning(
-                "paused: tenant over budget",
-                extra={"spent_usd": str(budget.spent_usd), "budget_usd": str(budget.budget_usd)},
-            )
-            return
+        policy = definition.model_routing or default_policy()
+        provider = get_settings().model_provider
+        span.set_attribute("routing.primary_tier", policy.primary_tier)
 
         try:
             text = store.get_object(text_key).decode("utf-8")
-            outcome = run_extraction(text, get_llm_client(), definition)
         except Exception as exc:
             _record_failure(document_id, f"extract: {exc}", final_attempt)
             span.set_attribute("outcome", "error")
             raise
 
+        # First attempt, on the tier the pipeline nominates. The budget is
+        # reserved before the call and settled after — see budget.py for why
+        # the check and the charge have to be one statement.
+        try:
+            call = _metered_extraction(
+                text=text,
+                definition=definition,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                provider=provider,
+                tier=policy.primary_tier,
+                purpose=PURPOSE_EXTRACT,
+            )
+        except Exception as exc:
+            _record_failure(document_id, f"extract: {exc}", final_attempt)
+            span.set_attribute("outcome", "error")
+            raise
+
+        if call is None:
+            _pause_on_budget(document_id, tenant_id, span)
+            return
+
+        outcome, spend = call.outcome, call.cost_usd
+        validation, confidence, routing = _assess(outcome, text, definition, span)
+
+        # Escalation: re-run on a stronger model, but only when the
+        # deterministic checks say the cheap answer is suspect.
+        trigger = escalation_trigger(
+            policy,
+            extraction_failed=outcome.record is None,
+            validation_passed=all(validation.values()) if validation else None,
+            routing_decision=routing.decision if routing else None,
+        )
+        if trigger:
+            span.set_attribute("routing.escalation_trigger", trigger)
+            escalated = _metered_extraction(
+                text=text,
+                definition=definition,
+                tenant_id=tenant_id,
+                document_id=document_id,
+                provider=provider,
+                tier=policy.escalate_to,
+                purpose=PURPOSE_ESCALATION,
+            )
+            if escalated is None:
+                # Out of budget for the second call: keep the first answer
+                # rather than losing the work already paid for.
+                log.warning("escalation skipped: tenant over budget", extra={"trigger": trigger})
+                span.set_attribute("routing.escalation", "skipped:budget")
+            else:
+                spend += escalated.cost_usd
+                if escalated.outcome.record is not None:
+                    outcome = escalated.outcome
+                    validation, confidence, routing = _assess(outcome, text, definition, span)
+                    span.set_attribute("routing.escalation", "accepted")
+                else:
+                    span.set_attribute("routing.escalation", "rejected:invalid")
+
+        span.set_attribute("cost.usd", float(spend))
+        span.set_attribute("model", outcome.model)
+
         if outcome.record is None:
-            # Semantic failure after the schema retry: store the raw attempt
-            # for debugging, mark failed, acknowledge (an identical re-run
-            # would fail the same way — this is not a transport error).
+            # Semantic failure after the schema retry (and after any
+            # escalation): store the raw attempt for debugging, mark failed,
+            # acknowledge — an identical re-run would fail the same way.
             _store_extraction(
                 document_id,
                 tenant_id,
@@ -213,46 +277,11 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
                 validation=None,
                 confidence=failed_extraction_report(outcome.error),
                 definition=definition,
+                cost_usd=spend,
             )
             _record_failure(document_id, f"extraction invalid: {outcome.error}", final=True)
             span.set_attribute("outcome", "invalid_extraction")
             return
-
-        with tracer.start_as_current_span("extraction.validate") as validate_span:
-            validate_span.set_attribute("openinference.span.kind", "CHAIN")
-            validation = evaluate_rules(outcome.record, definition)
-            for rule, passed in validation.items():
-                validate_span.set_attribute(f"validation.{rule}", passed)
-
-        with tracer.start_as_current_span("extraction.score") as score_span:
-            score_span.set_attribute("openinference.span.kind", "CHAIN")
-            confidence = score_extraction(
-                outcome.record,
-                validation,
-                attempts=outcome.attempts,
-                source_text=text,
-                definition=definition,
-            )
-            score_span.set_attribute("confidence.doc", confidence.doc_confidence)
-            score_span.set_attribute("confidence.reasons", list(confidence.reasons))
-            # The weakest fields are what a reviewer would open first.
-            for name, entry in sorted(confidence.fields.items(), key=lambda kv: kv[1].confidence)[
-                :3
-            ]:
-                score_span.set_attribute(f"confidence.field.{name}", entry.confidence)
-
-        # Routing consumes the calibrated model; the threshold comes from the
-        # config file, never from code (2.3b).
-        with tracer.start_as_current_span("extraction.route") as route_span:
-            route_span.set_attribute("openinference.span.kind", "CHAIN")
-            routing = route_extraction(
-                confidence.signals, confidence_model_for(definition), definition
-            )
-            route_span.set_attribute("routing.decision", routing.decision)
-            route_span.set_attribute("routing.calibration", routing.calibration)
-            route_span.set_attribute("routing.threshold", routing.threshold)
-            route_span.set_attribute("routing.model_version", routing.model_version)
-            route_span.set_attribute("routing.flagged_fields", list(routing.flagged_fields))
 
         _store_extraction(
             document_id,
@@ -263,6 +292,7 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
             confidence,
             routing,
             definition,
+            cost_usd=spend,
         )
         span.set_attribute("outcome", routing.decision)
         span.set_attribute("validation.passed", all(validation.values()))
@@ -276,10 +306,133 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
                 "doc_confidence": routing.doc_confidence,
                 "routing_decision": routing.decision,
                 "flagged_fields": list(routing.flagged_fields),
+                "cost_usd": str(spend),
+                "escalated": bool(trigger),
                 "confidence_model_version": routing.model_version,
                 "confidence_calibration": routing.calibration,
             },
         )
+
+
+@dataclass(frozen=True)
+class MeteredCall:
+    """One model call, with what it cost."""
+
+    outcome: ExtractionOutcome
+    cost_usd: Decimal
+    model: str
+    tier: str
+
+
+def _metered_extraction(
+    *,
+    text: str,
+    definition: PipelineDefinition,
+    tenant_id: str,
+    document_id: uuid.UUID,
+    provider: str,
+    tier: str,
+    purpose: str,
+) -> MeteredCall | None:
+    """Run one extraction under the budget, and record what it cost.
+
+    Returns None when the tenant cannot afford the call. The reservation is the
+    call's worst case — its prompt plus the hard `max_tokens` ceiling — so a
+    cap can never be crossed by a call whose size was not yet known; it is
+    settled to the real cost from the provider's own token counts.
+    """
+    model_id = model_for_tier(provider, tier)
+    client = get_llm_client(model=model_id)
+    label = f"{client.provider}:{client.model}"
+
+    settings = get_settings()
+    prompt_tokens = estimate_input_tokens(
+        build_system_prompt(definition), build_user_message(text, definition)
+    )
+    worst_case = worst_case_cost_usd(label, prompt_tokens, settings.llm_max_tokens)
+
+    reservation: Reservation | None = reserve(tenant_id, worst_case)
+    if reservation is None:
+        return None
+
+    try:
+        outcome = run_extraction(text, client, definition)
+    except Exception:
+        release(reservation)
+        raise
+
+    cost = call_cost_usd(label, outcome.input_tokens, outcome.output_tokens)
+    state = settle(reservation, cost)
+    sync_tenant_status(tenant_id, state)
+
+    record_usage(
+        tenant_id=tenant_id,
+        model=label,
+        purpose=purpose,
+        input_tokens=outcome.input_tokens,
+        output_tokens=outcome.output_tokens,
+        document_id=document_id,
+        pipeline_slug=definition.slug,
+        latency_ms=outcome.latency_ms,
+    )
+    return MeteredCall(outcome=outcome, cost_usd=cost, model=label, tier=tier)
+
+
+def _assess(outcome: ExtractionOutcome, text: str, definition: PipelineDefinition, span):
+    """Validate, score and route one extraction. Returns (validation, confidence, routing)."""
+    if outcome.record is None:
+        return None, failed_extraction_report(outcome.error), None
+
+    with tracer.start_as_current_span("extraction.validate") as validate_span:
+        validate_span.set_attribute("openinference.span.kind", "CHAIN")
+        validation = evaluate_rules(outcome.record, definition)
+        for rule, passed in validation.items():
+            validate_span.set_attribute(f"validation.{rule}", passed)
+
+    with tracer.start_as_current_span("extraction.score") as score_span:
+        score_span.set_attribute("openinference.span.kind", "CHAIN")
+        confidence = score_extraction(
+            outcome.record,
+            validation,
+            attempts=outcome.attempts,
+            source_text=text,
+            definition=definition,
+        )
+        score_span.set_attribute("confidence.doc", confidence.doc_confidence)
+        score_span.set_attribute("confidence.reasons", list(confidence.reasons))
+        # The weakest fields are what a reviewer would open first.
+        for name, entry in sorted(confidence.fields.items(), key=lambda kv: kv[1].confidence)[:3]:
+            score_span.set_attribute(f"confidence.field.{name}", entry.confidence)
+
+    # Routing consumes the calibrated model; the threshold comes from the
+    # config file, never from code (2.3b).
+    with tracer.start_as_current_span("extraction.route") as route_span:
+        route_span.set_attribute("openinference.span.kind", "CHAIN")
+        routing = route_extraction(confidence.signals, confidence_model_for(definition), definition)
+        route_span.set_attribute("routing.decision", routing.decision)
+        route_span.set_attribute("routing.calibration", routing.calibration)
+        route_span.set_attribute("routing.threshold", routing.threshold)
+        route_span.set_attribute("routing.model_version", routing.model_version)
+        route_span.set_attribute("routing.flagged_fields", list(routing.flagged_fields))
+
+    return validation, confidence, routing
+
+
+def _pause_on_budget(document_id: uuid.UUID, tenant_id: str, span) -> None:
+    """Stop the document at a resumable state and say why."""
+    state = budget_state(tenant_id)
+    sync_tenant_status(tenant_id, state)
+    with session_scope() as session:
+        document = session.get(Document, document_id, with_for_update=True)
+        document.status = DocumentStatus.BUDGET_EXCEEDED
+        document.last_error = (
+            f"tenant budget exhausted: spent {state.spent_usd} of {state.budget_usd} USD"
+        )
+    span.set_attribute("outcome", "budget_exceeded")
+    log.warning(
+        "paused: tenant over budget",
+        extra={"spent_usd": str(state.spent_usd), "budget_usd": str(state.budget_usd)},
+    )
 
 
 def _definition_for(doc_type: str | None) -> PipelineDefinition:
@@ -307,6 +460,7 @@ def _store_extraction(
     confidence: ConfidenceReport,
     routing: RoutingDecision | None = None,
     definition: PipelineDefinition | None = None,
+    cost_usd: Decimal | None = None,
 ) -> None:
     definition = definition or default_pipeline()
     queued_for_review: uuid.UUID | None = None
@@ -331,7 +485,9 @@ def _store_extraction(
             prompt_tokens=outcome.input_tokens,
             completion_tokens=outcome.output_tokens,
             latency_ms=outcome.latency_ms,
-            cost_usd=call_cost_usd(),
+            # Everything this document cost, escalations included; the
+            # per-call breakdown lives in usage_events.
+            cost_usd=cost_usd if cost_usd is not None else Decimal("0"),
         )
         session.add(extraction)
         session.flush()

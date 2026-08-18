@@ -58,5 +58,9 @@ calibrate-fit: .env
 eval: .env
 	uv run python -m docfactory_evals.run
 
+## Unit-cost rollup from recorded usage events (what the worker actually spent).
+costs: .env
+	uv run python -m docfactory_evals.costs
+
 migrate: .env
 	uv run alembic upgrade head

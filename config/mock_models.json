@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "note": "Behaviour profiles for the mock backend's model tiers. The mock stands in for models of different strength, so the tiers must differ in quality as well as price — otherwise routing cannot be measured at all. These degradations are SIMULATED, chosen to mimic failure modes small models actually have, and are deliberately of a kind the confidence signals can detect: that is what makes escalation fire on the documents that need it.",
+  "models": {
+    "mock-extractor-v1": {
+      "tier": "frontier",
+      "repairs": ["smallcaps", "logo_initial", "amount_fallbacks"],
+      "max_table_rows": null
+    },
+    "mock-extractor-small-v1": {
+      "tier": "small",
+      "repairs": ["logo_initial"],
+      "max_table_rows": 5,
+      "note": "Truncates long item tables and does not repair split small-caps runs or derive a missing total. The truncation breaks the sum-to-subtotal rule, which is exactly how a reviewer (or the router) notices."
+    }
+  }
+}

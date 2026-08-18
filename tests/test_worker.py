@@ -108,7 +108,10 @@ def test_digital_document_flows_to_a_routed_terminal_state(stack):
         ).all()
         assert extractions
         extraction = extractions[-1]
-        assert extraction.model == "mock:mock-extractor-v1"
+        # Routing sends the first attempt to the cheap tier; this document is
+        # extracted cleanly there, so it is never escalated.
+        assert extraction.model == "mock:mock-extractor-small-v1"
+        assert float(extraction.cost_usd) > 0, "the call must be metered"
         assert extraction.validation_passed is True
         assert all(extraction.validation.values())
         # 9 scalar fields + line_items.count + 5 items x 4 cells
@@ -250,7 +253,9 @@ def test_routing_sends_a_low_confidence_document_to_review(stack):
 
         corrupting = MockLLMClient()
         original = handlers.get_llm_client
-        handlers.get_llm_client = lambda: corrupting
+        # Routing asks for a model by tier; this stand-in ignores the request
+        # and always corrupts, which is the point of the test.
+        handlers.get_llm_client = lambda model=None: corrupting
         try:
             handlers.handle_extract(payload)
         finally:
