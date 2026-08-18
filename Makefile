@@ -1,6 +1,30 @@
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
+LOCALSTACK := docker compose -f infra/localstack/docker-compose.yml
+DATA_PLANE := infra/terraform/data-plane
+LS_VARS := -var-file=../../localstack/data-plane.tfvars
 
-.PHONY: setup up down seed test lint fmt eval eval-gate costs migrate calibrate calibrate-fit
+# ECR is a LocalStack Pro service; Community answers ecr:CreateRepository with
+# HTTP 501. The CI deploy role's inline policy references the repository ARNs,
+# so it cannot be applied either. Everything else in the layer is applied for
+# real — see infra/localstack/README.md for exactly what that does and does not
+# prove.
+LS_TARGETS := \
+	-target=aws_s3_bucket_notification.documents \
+	-target=aws_s3_bucket_public_access_block.documents \
+	-target=aws_s3_bucket_server_side_encryption_configuration.documents \
+	-target=aws_s3_bucket_versioning.documents \
+	-target=aws_iam_role_policy.api_task \
+	-target=aws_iam_role_policy.worker_task \
+	-target=aws_iam_role_policy.task_execution_secrets \
+	-target=aws_iam_role_policy_attachment.task_execution \
+	-target=aws_secretsmanager_secret_version.database_url_app \
+	-target=aws_secretsmanager_secret_version.database_url_owner \
+	-target=aws_secretsmanager_secret_version.anthropic_api_key \
+	-target='aws_iam_openid_connect_provider.github[0]' \
+	-target='aws_iam_role.github_deploy[0]'
+
+.PHONY: setup up down seed test lint fmt eval eval-gate costs migrate calibrate calibrate-fit \
+	localstack-up localstack-down localstack-apply localstack-verify localstack-destroy localstack-cycle
 
 .env:
 	cp .env.example .env
@@ -69,3 +93,34 @@ eval-gate: .env
 
 migrate: .env
 	uv run alembic upgrade head
+
+# --- LocalStack validation of the data plane (4c.5b) ------------------------
+#
+# `terraform apply` for real, against an emulator, before it is ever applied to
+# a real account. Proves the wiring stands up and tears down; proves nothing
+# about IAM enforcement, which LocalStack Community does not do. Needs
+# terraform on PATH and the LocalStack image (`docker pull localstack/localstack:4.0`).
+
+localstack-up:
+	$(LOCALSTACK) up -d --wait
+
+localstack-down:
+	$(LOCALSTACK) down -v
+
+localstack-apply: localstack-up
+	cd $(DATA_PLANE) && terraform init -input=false
+	cd $(DATA_PLANE) && terraform apply -input=false -auto-approve $(LS_VARS) $(LS_TARGETS)
+	cd $(DATA_PLANE) && terraform output -json > /tmp/docfactory-data-plane.json
+
+## Query the emulator for what apply claims to have built — including two
+## behavioural checks (an S3 drop must reach the queue; a message received
+## three times must land in the DLQ) that a config-only check cannot make.
+localstack-verify:
+	uv run python infra/localstack/verify.py --outputs /tmp/docfactory-data-plane.json
+
+localstack-destroy:
+	cd $(DATA_PLANE) && terraform destroy -input=false -auto-approve $(LS_VARS)
+
+## The whole cycle: stand it up, apply, verify, tear it down, confirm empty.
+localstack-cycle: localstack-apply localstack-verify localstack-destroy
+	$(LOCALSTACK) down -v

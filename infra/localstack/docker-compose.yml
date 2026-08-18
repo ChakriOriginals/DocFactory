@@ -1,0 +1,49 @@
+# LocalStack — the sandbox AWS the data-plane layer is applied against before
+# it is ever applied to a real account.
+#
+# Deliberately a SEPARATE compose project from infra/compose/docker-compose.yml:
+# the dev stack (MinIO + ElasticMQ + Postgres + Phoenix) is what you run all
+# day, and this is a throwaway you bring up for one validation pass and tear
+# down again. Nothing in the application points at it.
+#
+# WHAT THIS PROVES AND WHAT IT DOES NOT.
+#
+# Proves: the Terraform applies; the resources and their ARNs come out as
+# written; the dependency order is right; the S3 -> SQS notification is
+# configured AND fires; the queues carry the RedrivePolicy with
+# maxReceiveCount = 3; destroy removes what it created.
+#
+# Does NOT prove: that the IAM policies are sufficient. LocalStack Community
+# creates IAM roles and policies as objects but does not enforce them — every
+# API call succeeds no matter what the policy says. A green run here is
+# therefore evidence about WIRING, never about PERMISSIONS. The permissions are
+# covered statically instead (docs/deploy_runbook.md, the IAM pre-flight
+# table), and finally by the first real apply.
+name: docfactory-localstack
+
+services:
+  localstack:
+    image: localstack/localstack:4.0
+    ports:
+      - "4566:4566" # every service, one edge port
+    environment:
+      # Only what the data-plane layer touches. A narrower list starts faster
+      # and makes "service not available" an explicit result rather than a
+      # mysterious timeout.
+      SERVICES: s3,sqs,secretsmanager,iam,sts,ecr
+      # Queue URLs as http://localhost:4566/000000000000/<name>.
+      #
+      # The default ("standard") returns
+      # sqs.us-east-1.localhost.localstack.cloud hostnames, which need working
+      # public DNS; "path" returns /queue/<region>/<account>/<name>, a legacy
+      # shape the AWS provider rejects outright ("SQS Queue URL is in the
+      # incorrect format"). "off" is the one strategy that produces the
+      # account-id/queue-name path real SQS uses.
+      SQS_ENDPOINT_STRATEGY: "off"
+      LOCALSTACK_HOST: localhost:4566
+      DEBUG: "0"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
