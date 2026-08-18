@@ -58,10 +58,21 @@ def parse_s3_events(payload: dict) -> list[ObjectRef]:
     Only object-created events are acted on; deletes and lifecycle events are
     ignored rather than mistaken for new work. Keys are URL-decoded because
     both S3 and MinIO percent-encode them.
+
+    THE `s3:` PREFIX IS NOT PART OF THE EVENT. It is part of the notification
+    *configuration* ("s3:ObjectCreated:*"), and the two are easy to conflate.
+    MinIO puts it on the record as well and emits "s3:ObjectCreated:Put"; real
+    S3 delivering to SQS emits "ObjectCreated:Put". Matching only MinIO's form
+    is silent, total failure of the batch path in the cloud: the worker
+    receives the message, parses zero references, acknowledges it, and the
+    dropped document is never seen again. Found by applying the data plane to
+    LocalStack and dropping a real object through it (Phase 4c.5b) — never by a
+    local run, because locally MinIO is the only producer.
     """
     refs: list[ObjectRef] = []
     for record in payload.get("Records", []):
-        if not str(record.get("eventName", "")).startswith("s3:ObjectCreated"):
+        event_name = str(record.get("eventName", "")).removeprefix("s3:")
+        if not event_name.startswith("ObjectCreated"):
             continue
         s3 = record.get("s3", {})
         bucket = s3.get("bucket", {}).get("name")

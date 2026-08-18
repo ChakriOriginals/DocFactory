@@ -21,14 +21,19 @@ from sqlalchemy import delete, select
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def s3_event(bucket: str, key: str, size: int = 1024) -> dict:
-    """The shape S3 and MinIO both emit for an object-created notification."""
+def s3_event(bucket: str, key: str, size: int = 1024, *, event: str = "ObjectCreated:Put") -> dict:
+    """An object-created notification.
+
+    `event` defaults to the form REAL S3 delivers to SQS. MinIO prefixes the
+    same event with "s3:", so both spellings reach this parser depending on
+    which storage backend is in front of it — see MINIO_PREFIXED below.
+    """
     return {
         "Records": [
             {
                 "eventVersion": "2.1",
                 "eventSource": "aws:s3",
-                "eventName": "s3:ObjectCreated:Put",
+                "eventName": event,
                 "s3": {
                     "bucket": {"name": bucket},
                     "object": {"key": key, "size": size},
@@ -38,16 +43,32 @@ def s3_event(bucket: str, key: str, size: int = 1024) -> dict:
     }
 
 
+# The two producers, spelled exactly as each emits. Verified against LocalStack
+# (AWS shape, Phase 4c.5b) and against the compose MinIO (prefixed shape).
+AWS_SHAPE = "ObjectCreated:Put"
+MINIO_PREFIXED = "s3:ObjectCreated:Put"
+
+
 class TestEventParsing:
     """Pure parsing — no services needed."""
 
-    def test_object_created_events_yield_a_reference(self):
-        refs = parse_s3_events(s3_event("docfactory", "dev-tenant/dropbox/x.pdf"))
+    @pytest.mark.parametrize("event_name", [AWS_SHAPE, MINIO_PREFIXED])
+    def test_object_created_events_yield_a_reference(self, event_name):
+        """Both producers' spellings must parse.
+
+        Only MinIO's was covered before 4c.5b, which is why the AWS form went
+        unnoticed until the data plane was applied to LocalStack: an unmatched
+        event is not an error, it is silence, and the batch path would simply
+        have done nothing in the cloud.
+        """
+        refs = parse_s3_events(s3_event("docfactory", "dev-tenant/dropbox/x.pdf", event=event_name))
         assert [(r.bucket, r.key) for r in refs] == [("docfactory", "dev-tenant/dropbox/x.pdf")]
 
-    def test_other_event_types_are_ignored(self):
-        event = s3_event("docfactory", "dev-tenant/dropbox/x.pdf")
-        event["Records"][0]["eventName"] = "s3:ObjectRemoved:Delete"
+    @pytest.mark.parametrize(
+        "event_name", ["ObjectRemoved:Delete", "s3:ObjectRemoved:Delete", "ObjectRestore:Post"]
+    )
+    def test_other_event_types_are_ignored(self, event_name):
+        event = s3_event("docfactory", "dev-tenant/dropbox/x.pdf", event=event_name)
         assert parse_s3_events(event) == []
 
     def test_percent_encoded_keys_are_decoded(self):
