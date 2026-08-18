@@ -236,3 +236,62 @@ def test_decimal_precision_is_preserved_in_residuals():
     # 1000 * 0.075 = 75.00 vs 75.01 -> within tolerance, rule still passes
     assert report.signals["rule.tax_matches_rate"] is True
     assert report.signals["residual.tax_vs_rate"] == pytest.approx(float(Decimal("-0.01")))
+
+
+class TestTruncatedVendorDetection:
+    """The 2.2a measurement's real finding.
+
+    Nine of the ten errors invisible to the 2.1 scorer were *truncations*, not
+    hallucinations: the extractor kept only the small-caps capitals, turning
+    "Bloch Bloch AG" into "B B AG". Groundedness cannot see these — the kept
+    characters genuinely are in the source text — so the discriminator is
+    token shape. Measured across all 500 ground-truth vendor names the lowest
+    legitimate mean token length is 2.80, while every observed truncation is
+    at or below 1.67, so the rule separates cleanly rather than being fitted
+    to the golden set.
+    """
+
+    @pytest.mark.parametrize(
+        "truncated,real",
+        [
+            ("B B AG", "Bloch Bloch AG"),
+            ("P G H", "Pärtzelt GmbH"),
+            ("R g", "Rogge GbR"),
+            ("S K .G.", "Schleich Kostolzin e.G."),
+            ("W AG", "Wulf AG"),
+            ("B kG", "Becker KG"),
+            ("H R .V.", "Heinz Rohleder e.V."),
+            ("L W .V.", "Löchel Warmer e.V."),
+            ("G S AG", "Gröttner Schottin AG"),
+        ],
+    )
+    def test_observed_truncations_are_flagged(self, truncated, real):
+        assert looks_fragmented(truncated) is True, truncated
+        assert looks_fragmented(real) is False, real
+
+    @pytest.mark.parametrize(
+        "vendor",
+        [
+            "Hamann AG & Co. KG",  # lowest mean token length in the whole corpus
+            "Jacob AG & Co. OHG",
+            "Cox PLC",
+            "Hein KG",
+            "Wulf AG",
+            "Seip AG",
+            "J P Morgan",
+            "3M",
+        ],
+    )
+    def test_short_but_legitimate_names_are_not_flagged(self, vendor):
+        assert looks_fragmented(vendor) is False
+
+    def test_truncated_vendor_lowers_the_vendor_field_score(self):
+        report = score(make_invoice(vendor="B B AG"))
+        assert report.fields["vendor"].confidence < 1.0
+        assert report.doc_confidence < 1.0
+
+    def test_casing_only_errors_remain_undetectable(self):
+        # "RöhRicht" for "Röhricht" — the tenth miss. No shape or groundedness
+        # signal can see this; recorded so the limitation stays visible.
+        assert looks_fragmented("RöhRicht") is False
+        assert score(make_invoice(vendor="RöhRicht")).doc_confidence == 1.0

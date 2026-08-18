@@ -159,7 +159,12 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
 
         with tracer.start_as_current_span("extraction.score") as score_span:
             score_span.set_attribute("openinference.span.kind", "CHAIN")
-            confidence = score_extraction(outcome.invoice, validation, attempts=outcome.attempts)
+            confidence = score_extraction(
+                outcome.invoice,
+                validation,
+                attempts=outcome.attempts,
+                source_text=text,
+            )
             score_span.set_attribute("confidence.doc", confidence.doc_confidence)
             score_span.set_attribute("confidence.reasons", list(confidence.reasons))
             # The weakest fields are what a reviewer would open first.

@@ -32,6 +32,7 @@ Three things about the design are deliberate:
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from docfactory_core.groundedness import GROUNDEDNESS_THRESHOLD, groundedness
 from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
 
 # --- Uncalibrated penalty priors (see note 3 above) -------------------------
@@ -42,6 +43,16 @@ PENALTY_RETRY = 0.10  # needed a second attempt to satisfy the schema
 PENALTY_VENDOR_FRAGMENTED = 0.10  # split-run text artifact in the vendor name
 PENALTY_NONPOSITIVE_TOTAL = 0.25
 PENALTY_SUSPECT_FIELD_SHAPE = 0.20  # per-field: empty-ish / implausible value
+# Free-text fields have no arithmetic guard at all, so a value that cannot be
+# traced back to the source text is the only evidence available that it was
+# invented. Weighted accordingly — still a prior until 2.2c fits it.
+PENALTY_UNGROUNDED_FIELD = 0.35
+
+# String fields checked against the source text. Money and dates are omitted:
+# they are already constrained by the arithmetic rules, and their canonical
+# form ("25832.09") deliberately differs from the printed form ("25.832,09 €"),
+# so a text search would report a false negative on a correct extraction.
+GROUNDED_FIELDS = ("vendor", "invoice_number")
 
 # Which fields each validation rule implicates. Failing the rule lowers
 # confidence for exactly these fields.
@@ -55,12 +66,22 @@ RULE_FIELDS: dict[str, tuple[str, ...]] = {
 
 _DATE_RULES = frozenset({"invoice_date_parses", "due_date_not_before_invoice_date"})
 
-# A vendor name is "fragmented" when at least this fraction of its tokens are
-# bare single characters — the signature of small-caps rendering, which splits
-# "Bauer Weinhold" into runs like "B W" / "auer einhold" (see docs/backlog.md).
-# The observed second run sits exactly at 0.4, hence >= rather than >.
+# Small-caps rendering splits a vendor name into character runs, and the
+# extractor can go wrong in two distinguishable ways. Both are shape defects,
+# so one predicate covers them:
+#
+#   scattered  "B W S & C . Kg a"  -> many bare single-character tokens
+#   truncated  "B B AG"            -> only the capitals kept, stubby tokens
+#
+# Truncation is what the 2.2a measurement found dominating: nine of the ten
+# errors the arithmetic scorer missed. Groundedness cannot see them (the kept
+# characters really are in the source text), so token shape is the
+# discriminator. Across all 500 ground-truth vendor names the lowest
+# legitimate mean token length is 2.80 ("Hamann AG & Co. KG") while every
+# observed truncation is <= 1.67, so 2.0 sits in open space between them.
 _FRAGMENT_TOKEN_RATIO = 0.4
 _FRAGMENT_MIN_TOKENS = 4
+_MIN_MEAN_TOKEN_LENGTH = 2.0
 
 # Per-line consistency: the generator enforces amount == quantity x unit_price,
 # so a line that breaks it localizes the error to that row.
@@ -97,8 +118,20 @@ class ConfidenceReport:
 
 
 def score_extraction(
-    invoice: Invoice, validation: dict[str, bool], *, attempts: int = 1
+    invoice: Invoice,
+    validation: dict[str, bool],
+    *,
+    attempts: int = 1,
+    source_text: str | None = None,
 ) -> ConfidenceReport:
+    """Score an extraction.
+
+    `source_text` is the parsed document text. When supplied, free-text fields
+    are additionally checked for groundedness — without it the scorer is blind
+    to invented string values (the 2.1 finding), so callers in the pipeline
+    should always pass it. It stays optional so the arithmetic signals can be
+    scored standalone.
+    """
     signals: dict[str, object] = {"attempts": attempts}
     doc_penalty = 0.0
     doc_reasons: list[str] = []
@@ -170,6 +203,29 @@ def score_extraction(
         field_penalties["line_items"] += PENALTY_SUSPECT_FIELD_SHAPE
         field_reasons["line_items"].append(f"row_arithmetic:{inconsistent_lines}")
 
+    # --- groundedness: the only guard on unconstrained free text ---
+    if source_text is not None:
+        for name in GROUNDED_FIELDS:
+            score = groundedness(getattr(invoice, name), source_text)
+            signals[f"groundedness.{name}"] = score
+            if score < GROUNDEDNESS_THRESHOLD:
+                doc_penalty += PENALTY_UNGROUNDED_FIELD
+                doc_reasons.append(f"ungrounded:{name}")
+                field_penalties[name] += PENALTY_UNGROUNDED_FIELD
+                field_reasons[name].append(f"ungrounded:{score}")
+
+        item_scores = [groundedness(item.description, source_text) for item in invoice.line_items]
+        weakest = min(item_scores, default=1.0)
+        signals["groundedness.line_items_min"] = weakest
+        signals["groundedness.line_items_mean"] = (
+            round(sum(item_scores) / len(item_scores), 4) if item_scores else 1.0
+        )
+        if weakest < GROUNDEDNESS_THRESHOLD:
+            doc_penalty += PENALTY_UNGROUNDED_FIELD
+            doc_reasons.append("ungrounded:line_item_description")
+            field_penalties["line_items"] += PENALTY_UNGROUNDED_FIELD
+            field_reasons["line_items"].append(f"ungrounded_description:{weakest}")
+
     fields = {
         name: FieldConfidence(name, _clamp(1.0 - penalty), tuple(field_reasons[name]))
         for name, penalty in field_penalties.items()
@@ -192,11 +248,18 @@ def failed_extraction_report(error: str | None) -> ConfidenceReport:
 
 
 def looks_fragmented(value: str) -> bool:
-    """True when a string reads as split character runs ('B W S & C . Kg a').
+    """True when a string reads as split character runs rather than a name.
 
-    Requires several tokens so ordinary initials ("J P Morgan") don't trip it.
+    Catches both observed forms: stubby tokens throughout ("B B AG", "R g"),
+    and longer strings peppered with bare single characters
+    ("B W S & C . Kg a"). Ordinary initials ("J P Morgan", mean 2.67) and
+    genuinely short real names ("Cox PLC", "3M") clear both rules.
     """
     tokens = value.split()
+    if len(tokens) < 2:
+        return False
+    if sum(len(token) for token in tokens) / len(tokens) < _MIN_MEAN_TOKEN_LENGTH:
+        return True
     if len(tokens) < _FRAGMENT_MIN_TOKENS:
         return False
     singles = sum(1 for token in tokens if len(token) == 1 and token.isalnum())

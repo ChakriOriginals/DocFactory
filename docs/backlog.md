@@ -44,6 +44,25 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **No CI workflow yet.** `make test` and `make lint` are CI-ready and green;
   wiring GitHub Actions is a later phase.
 
+## From Phase 2.2a
+
+- **Groundedness detects hallucination, not truncation — and the corpus
+  contains no hallucinations.** Measured over the same 74 digital golden
+  docs, adding the groundedness signal changed precision/recall by exactly
+  nothing (100% / 37.5%). All ten invisible errors were *truncations* of
+  small-caps runs ("B B AG" for "Bloch Bloch AG"), and every one scored
+  groundedness 1.0 because the kept characters genuinely are in the source
+  text. The signal is correct but untested by this corpus; 2.2b's injected
+  wrong-but-plausible vendors are what will exercise it.
+- **Casing-only errors remain undetectable.** "RöhRicht" for "Röhricht" is
+  the one remaining miss (recall 93.8%). No shape, arithmetic, or
+  groundedness signal can see it. Catching it needs either case-normalized
+  comparison against the source span or a second extraction pass.
+- **Groundedness cannot flag over-truncation by construction.** A strict
+  substring of the correct answer is, definitionally, grounded. Any future
+  "coverage" signal (did we take *enough* of the relevant span?) is a
+  different measurement from "is this invented?".
+
 ## From Phase 2.1
 
 - **The deterministic scorer is blind to free-text errors — this is structural,
