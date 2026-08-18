@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     # config. Point at a different version to roll forward or back.
     confidence_model_path: str = "config/confidence_model_v2.json"
 
+    # How long a review task has before it breaches. Configurable rather than
+    # constant: Phase 3 makes this per-tenant/per-pipeline, and the deadline is
+    # frozen onto each task at creation so changing it cannot retroactively
+    # breach work already queued.
+    review_sla_hours: float = 24.0
+
     phoenix_collector_endpoint: str = "http://localhost:6006"
 
     default_tenant_id: str = "dev-tenant"

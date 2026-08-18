@@ -14,20 +14,27 @@ import hashlib
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
-from typing import BinaryIO
+from datetime import UTC, datetime
+from typing import BinaryIO, Literal
 
 from docfactory_core.bootstrap import ensure_infra
 from docfactory_core.config import get_settings
 from docfactory_core.db import session_scope
 from docfactory_core.logging import configure_logging, document_id_var
-from docfactory_core.models import Document, DocumentStatus, Extraction
+from docfactory_core.models import (
+    Document,
+    DocumentStatus,
+    Extraction,
+    ReviewResolution,
+    ReviewTask,
+)
 from docfactory_core.queues import QueueBroker
+from docfactory_core.review import open_tasks, queue_depth, resolve_task
 from docfactory_core.storage import ObjectStore
 from docfactory_core.tracing import inject_trace_context, setup_tracing
 from fastapi import FastAPI, HTTPException, Response, UploadFile
 from opentelemetry import trace
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -62,8 +69,8 @@ class ExtractionView(BaseModel):
     output: dict
     validation: dict | None
     validation_passed: bool | None
-    # Uncalibrated (see core.confidence): usable for ranking, not as a
-    # probability, and deliberately not compared against any threshold yet.
+    # Since 2.3b this is the calibrated probability of the weakest field, so
+    # it is directly comparable to the routing threshold.
     doc_confidence: float | None
     field_confidence: dict[str, float]
     created_at: datetime
@@ -82,6 +89,34 @@ class DocumentView(BaseModel):
     parsed_at: datetime | None
     extracted_at: datetime | None
     extraction: ExtractionView | None
+
+
+class ReviewTaskSummary(BaseModel):
+    task_id: uuid.UUID
+    document_id: uuid.UUID
+    status: str
+    flagged_fields: list[str]
+    created_at: datetime
+    sla_due_at: datetime
+    breached: bool
+
+
+class FlaggedField(BaseModel):
+    name: str
+    value: str | None
+    confidence: float | None
+
+
+class ReviewTaskDetail(ReviewTaskSummary):
+    doc_confidence: float | None
+    confidence_model_version: int | None
+    extraction_output: dict
+    flagged: list[FlaggedField]
+
+
+class ResolveRequest(BaseModel):
+    resolution: Literal["approved_as_is", "corrected"]
+    corrections: dict[str, str] = Field(default_factory=dict)
 
 
 @app.get("/healthz")
@@ -225,3 +260,81 @@ def _mark_duplicate(span: trace.Span, document: Document) -> None:
         "duplicate upload, returning existing document",
         extra={"document_id": str(document.id), "status": document.status},
     )
+
+
+def _summarize(task: ReviewTask, now: datetime) -> ReviewTaskSummary:
+    return ReviewTaskSummary(
+        task_id=task.id,
+        document_id=task.document_id,
+        status=task.status,
+        flagged_fields=list(task.flagged_fields),
+        created_at=task.created_at,
+        sla_due_at=task.sla_due_at,
+        breached=task.is_breached(now),
+    )
+
+
+@app.get("/review/tasks", response_model=list[ReviewTaskSummary])
+def list_review_tasks(limit: int = 50) -> list[ReviewTaskSummary]:
+    """Open review tasks, oldest first — the queue a reviewer works top-down."""
+    now = datetime.now(UTC)
+    return [_summarize(task, now) for task in open_tasks(limit=limit)]
+
+
+@app.get("/review/queue", response_model=dict)
+def review_queue_stats() -> dict:
+    """Depth, age and breach count.
+
+    Detection only: alerting and burn-rate are Phase 5 operations concerns.
+    """
+    return queue_depth()
+
+
+@app.get("/review/tasks/{task_id}", response_model=ReviewTaskDetail)
+def get_review_task(task_id: uuid.UUID) -> ReviewTaskDetail:
+    with session_scope() as session:
+        task = session.get(ReviewTask, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="review task not found")
+        extraction = session.get(Extraction, task.extraction_id)
+        by_name = {field.name: field for field in extraction.fields}
+        # Only the cells that tripped the threshold: pointing the reviewer at
+        # those is the payoff of the field-level attribution from 2.1.
+        flagged = [
+            FlaggedField(
+                name=name,
+                value=by_name[name].value if name in by_name else None,
+                confidence=float(by_name[name].confidence)
+                if name in by_name and by_name[name].confidence is not None
+                else None,
+            )
+            for name in task.flagged_fields
+        ]
+        return ReviewTaskDetail(
+            **_summarize(task, datetime.now(UTC)).model_dump(),
+            doc_confidence=float(extraction.doc_confidence)
+            if extraction.doc_confidence is not None
+            else None,
+            confidence_model_version=extraction.confidence_model_version,
+            extraction_output=extraction.output,
+            flagged=flagged,
+        )
+
+
+@app.post("/review/tasks/{task_id}/resolve", status_code=200)
+def resolve_review_task(task_id: uuid.UUID, request: ResolveRequest) -> dict:
+    """Accept the extraction as-is, or write corrected values.
+
+    A correction updates the stored extraction and appends one eval_case per
+    field, so the reviewer's effort becomes future evaluation data.
+    """
+    try:
+        resolve_task(
+            task_id,
+            resolution=ReviewResolution(request.resolution),
+            corrections=request.corrections,
+        )
+    except ValueError as exc:
+        status = 404 if "not found" in str(exc) else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    return {"task_id": str(task_id), "status": "resolved"}

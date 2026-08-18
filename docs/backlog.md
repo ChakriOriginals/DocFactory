@@ -44,6 +44,25 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **No CI workflow yet.** `make test` and `make lint` are CI-ready and green;
   wiring GitHub Actions is a later phase.
 
+## From Phase 2.3c
+
+- **No reviewer UI.** The review queue is API + tests only. A deliberately
+  ugly, time-boxed React page (queue list, document view, flagged cells,
+  approve/correct) is a separate task — the API shape is settled, so it is
+  presentation work, not design work.
+- **eval_cases are written but not yet consumed.** Human corrections
+  accumulate as labelled data; nothing feeds them into `make eval` or the
+  calibration refit yet. That wiring is what makes review compound and should
+  come before anyone leans on the queue at volume.
+- **SLA is detectable, not alerted.** `GET /review/queue` exposes depth,
+  oldest age and breach count, and breached tasks are queryable. Alerting,
+  burn-rate and backpressure are Phase 5.
+- **SLA is a single global value.** `review_sla_hours` is one setting; Phase 3
+  makes it per-tenant/per-pipeline. Deadlines are frozen onto tasks at
+  creation, so that change cannot retroactively breach queued work.
+- **No reviewer identity or audit trail.** Resolutions record what changed but
+  not who changed it; that needs the auth work in Phase 3.
+
 ## From Phase 2.3a
 
 - **The operating-point rule picks a threshold that lets arithmetic errors

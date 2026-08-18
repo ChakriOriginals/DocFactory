@@ -164,3 +164,81 @@ class ExtractionField(ColumnsMixin, Base):
     __table_args__ = (
         UniqueConstraint("extraction_id", "name", name="uq_extraction_fields_extraction_name"),
     )
+
+
+class ReviewStatus(enum.StrEnum):
+    OPEN = "open"
+    RESOLVED = "resolved"
+
+
+class ReviewResolution(enum.StrEnum):
+    APPROVED_AS_IS = "approved_as_is"
+    CORRECTED = "corrected"
+
+
+_REVIEW_STATUS_CHECK = "status IN ({})".format(", ".join(f"'{s}'" for s in ReviewStatus))
+
+
+class ReviewTask(ColumnsMixin, Base):
+    """One human review of one extraction.
+
+    `flagged_fields` carries the specific below-threshold field names rather
+    than just the document id — the fault localization built in 2.1 exists so
+    a reviewer can be pointed at the cells that look wrong instead of re-reading
+    the whole invoice.
+    """
+
+    __tablename__ = "review_tasks"
+
+    extraction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("extractions.id", ondelete="CASCADE"), nullable=False
+    )
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=ReviewStatus.OPEN)
+    # Absolute deadline, computed from a configurable SLA duration at creation
+    # time. Storing the deadline rather than the duration means a later config
+    # change cannot retroactively breach or un-breach existing tasks.
+    sla_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    flagged_fields: Mapped[list] = mapped_column(JSONB, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution: Mapped[str | None] = mapped_column(String(32))
+
+    extraction: Mapped[Extraction] = relationship()
+
+    __table_args__ = (
+        # One task per extraction: redelivery must not queue the same work twice.
+        UniqueConstraint("extraction_id", name="uq_review_tasks_extraction"),
+        CheckConstraint(_REVIEW_STATUS_CHECK, name="ck_review_tasks_status"),
+        Index("ix_review_tasks_tenant_status_due", "tenant_id", "status", "sla_due_at"),
+    )
+
+    def is_breached(self, now: datetime) -> bool:
+        return self.status == ReviewStatus.OPEN and now > self.sla_due_at
+
+
+class EvalCase(ColumnsMixin, Base):
+    """A human correction, captured as future eval data.
+
+    This is the loop that makes review compound: every field a reviewer fixes
+    becomes a labelled case the eval harness and future calibration runs can
+    use, so corrections improve the system rather than only the one document.
+    """
+
+    __tablename__ = "eval_cases"
+
+    tenant_id: Mapped[str] = mapped_column(Text, nullable=False)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    extraction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("extractions.id", ondelete="CASCADE"), nullable=False
+    )
+    field_name: Mapped[str] = mapped_column(Text, nullable=False)
+    extracted_value: Mapped[str | None] = mapped_column(Text)
+    corrected_value: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="human_review")
+
+    __table_args__ = (Index("ix_eval_cases_tenant_document", "tenant_id", "document_id"),)

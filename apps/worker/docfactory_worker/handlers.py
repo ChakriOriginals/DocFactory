@@ -34,6 +34,7 @@ from docfactory_core.llm import get_llm_client
 from docfactory_core.models import Document, DocumentStatus, Extraction, ExtractionField
 from docfactory_core.parsing import extract_pdf_text
 from docfactory_core.queues import QueueBroker
+from docfactory_core.review import ensure_review_task
 from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
 from docfactory_core.storage import ObjectStore
 from docfactory_core.tracing import extract_trace_context, inject_trace_context
@@ -217,6 +218,8 @@ def _store_extraction(
     confidence: ConfidenceReport,
     routing: RoutingDecision | None = None,
 ) -> None:
+    queued_for_review: uuid.UUID | None = None
+    flagged: tuple[str, ...] = ()
     with session_scope() as session:
         extraction = Extraction(
             document_id=document_id,
@@ -255,6 +258,16 @@ def _store_extraction(
                 DocumentStatus(routing.decision) if routing else DocumentStatus.EXTRACTED
             )
             document.extracted_at = datetime.now(UTC)
+            queued_for_review = (
+                extraction.id if routing and routing.decision == "needs_review" else None
+            )
+            flagged = routing.flagged_fields if routing else ()
+
+    # Outside the write transaction: task creation is itself idempotent, so a
+    # crash between the two leaves the document routed and simply re-queues on
+    # the next delivery rather than double-queueing human work.
+    if queued_for_review is not None:
+        ensure_review_task(queued_for_review, flagged_fields=flagged)
 
 
 def _flatten_fields(invoice: Invoice) -> dict[str, str]:
