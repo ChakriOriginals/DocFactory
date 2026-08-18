@@ -44,6 +44,33 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
 - **No CI workflow yet.** `make test` and `make lint` are CI-ready and green;
   wiring GitHub Actions is a later phase.
 
+## From Phase 2.2c
+
+- **99% auto-approve precision is unreachable, and the cause is one error
+  class.** Best achievable on the held-out golden set is 98.29% precision at
+  94.9% coverage. Of the 12 wrong fields that survive auto-approval, 10 are
+  `shifted_date` — an injected error that moves the invoice date earlier while
+  leaving every validation rule satisfied. Every *detectable* class scores
+  97-100% precision. Closing the gap needs a date-corroboration signal (does
+  the extracted date appear near a date label in the source text?), not more
+  weight tuning.
+- **The confidence score is discrete, not continuous.** 702 of 740 holdout
+  fields receive an identical score because their signal features are all
+  zero, so coverage jumps from 0% to ~95% with nothing selectable between.
+  Only ~7 operating points exist. Phase 2.3 picks one of them; it cannot dial
+  coverage finely. Finer control needs a feature that varies across *clean*
+  documents — a per-field extraction margin, for example.
+- **`needed_retry` fits to exactly zero weight.** No document in the corpus
+  needed a schema retry, so the feature carries no information. Keep it (it
+  will matter in `anthropic` mode) but know it is currently inert.
+- **Calibration has never been run against a real model.** Everything is mock
+  + injected corruption. The error *distribution* from a real model will
+  differ, so the fitted weights should be re-fit from an `anthropic`-mode
+  dataset before anyone trusts the threshold in production.
+- **Holdout is small.** 74 documents / 740 fields, with 42 wrong fields total.
+  Per-error-class cells are 30-100 fields, so those precision figures carry
+  wide error bars.
+
 ## From Phase 2.2a
 
 - **Groundedness detects hallucination, not truncation — and the corpus

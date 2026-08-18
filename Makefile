@@ -1,6 +1,6 @@
 COMPOSE := docker compose -f infra/compose/docker-compose.yml --env-file .env
 
-.PHONY: setup up down seed test lint fmt eval migrate
+.PHONY: setup up down seed test lint fmt eval migrate calibrate calibrate-fit
 
 .env:
 	cp .env.example .env
@@ -41,6 +41,15 @@ lint:
 fmt:
 	uv run ruff check --fix .
 	uv run ruff format .
+
+## Calibration study (2.2c): build the labelled dataset, then fit offline.
+## Corruption is enabled here and only here — the mock stays clean everywhere else.
+calibrate: .env
+	MOCK_CORRUPTION_RATE=0.35 uv run python -m docfactory_evals.calibrate
+
+## Re-fit from already-stored signal vectors, no extraction pass.
+calibrate-fit: .env
+	uv run python -m docfactory_evals.calibrate --fit-only
 
 ## Field-accuracy eval on the golden set. Uses MODEL_PROVIDER from .env
 ## (mock by default). For a real number: MODEL_PROVIDER=anthropic make eval

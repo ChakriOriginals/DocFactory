@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "model": "logistic",
+  "features": [
+    "implicating_rules_failed",
+    "log_residual_magnitude",
+    "groundedness",
+    "shape_suspect",
+    "row_arithmetic_broken",
+    "needed_retry"
+  ],
+  "weights": [
+    -0.5916541638335157,
+    -0.0028349256983551366,
+    1.566259510146842,
+    -1.6688953012852643,
+    -0.663627558496713,
+    0.0
+  ],
+  "bias": 3.8208537889174883,
+  "standardization": {
+    "mean": [
+      0.026568265682656828,
+      0.0004511441101219328,
+      0.9936947232472324,
+      0.028782287822878228,
+      0.004428044280442804,
+      0.0
+    ],
+    "std": [
+      0.1608178885040703,
+      0.0032420441395323847,
+      0.0693263059561374,
+      0.16719410296104056,
+      0.06639606040334932,
+      1e-09
+    ]
+  },
+  "operating_point": {
+    "threshold": 0.675,
+    "target_precision": 0.99,
+    "target_met": false,
+    "measured_precision": 0.9829059829059829,
+    "auto_approve_rate": 0.9486486486486486
+  },
+  "provenance": {
+    "fitted_at": "2026-08-18T00:57:43+00:00",
+    "git_sha": "ca1342b",
+    "train_rows": 2710,
+    "holdout_rows": 740,
+    "dataset": {
+      "built_at": "2026-08-18T00:55:25+00:00",
+      "documents": 345,
+      "corruption_rate": 0.35,
+      "corruption_seed": 1337,
+      "model_provider": "mock",
+      "git_sha": "ca1342b"
+    },
+    "note": "Fitted on non-golden documents; operating point measured on the held-out golden set. Consumed by Phase 2.3 routing."
+  }
+}

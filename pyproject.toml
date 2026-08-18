@@ -17,6 +17,12 @@ dev = [
     "pytest>=8.3",
     "ruff>=0.8",
 ]
+# Calibration study only (numpy for the fit, matplotlib for the curves).
+# Deliberately not a runtime dependency of api/worker/core.
+calibration = [
+    "numpy>=2",
+    "matplotlib>=3.9",
+]
 # The synthetic-data generator is dev tooling, not a shippable service,
 # so its heavyweight deps (WeasyPrint et al.) live in a group, not a package.
 synth = [

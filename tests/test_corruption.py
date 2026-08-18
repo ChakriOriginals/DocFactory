@@ -14,6 +14,7 @@ from docfactory_core.corruption import (
     ERROR_CLASS_FIELDS,
     ERROR_CLASSES,
     apply_corruption,
+    document_key,
     plan_corruption,
 )
 from docfactory_core.schemas import Invoice
@@ -180,3 +181,49 @@ def _plan_of_class(error_class: str):
 def test_no_corruption_leaves_the_payload_untouched():
     payload = json.loads(json.dumps(CLEAN))
     assert apply_corruption(payload, None, seed=4) == CLEAN
+
+
+class TestLocalizedMockOutput:
+    """Corruption runs on raw mock output, which is localized, not canonical.
+
+    The mock emits amounts and dates as printed ("$1,224.26", "25.832,09 €",
+    "06/06/2026") because Pydantic canonicalizes them downstream. Corruption
+    happens before that boundary, so it must normalize its own inputs.
+    """
+
+    @pytest.mark.parametrize(
+        "total,currency", [("$1,224.26", "USD"), ("25.832,09 €", "EUR"), ("1224.26", "USD")]
+    )
+    def test_arithmetic_drift_handles_printed_amounts(self, total, currency):
+        payload = json.loads(json.dumps(CLEAN)) | {"total": total, "currency": currency}
+        corrupted = apply_corruption(payload, _plan_of_class("arithmetic_drift"), seed=4)
+        Invoice.model_validate(corrupted)  # must remain schema-valid
+
+    @pytest.mark.parametrize("issued", ["06/06/2026", "25.12.2024", "Jan 17, 2026", "2025-11-10"])
+    def test_shifted_date_handles_printed_dates(self, issued):
+        payload = json.loads(json.dumps(CLEAN)) | {"invoice_date": issued, "due_date": "2027-01-01"}
+        corrupted = apply_corruption(payload, _plan_of_class("shifted_date"), seed=4)
+        invoice = Invoice.model_validate(corrupted)
+        assert invoice.due_date >= invoice.invoice_date
+
+
+class TestDocumentKeyStability:
+    """A mislabelling bug found in 2.2c: the prompt wrapper made the client and
+    the study hash different strings for the same document."""
+
+    def test_surrounding_whitespace_does_not_change_the_plan(self):
+        text = "Underwood Ltd\nInvoice No. INV-2026-96748\n"
+        wrapped = f"\n\n{text}"  # exactly what the prompt marker leaves behind
+        assert document_key(text) == document_key(wrapped)
+        assert plan_corruption(text, rate=1.0, seed=3) == plan_corruption(wrapped, rate=1.0, seed=3)
+
+    def test_the_client_and_a_caller_agree_on_the_plan(self):
+        from docfactory_core.extraction import SYSTEM_PROMPT  # noqa: F401
+        from docfactory_core.llm import MockLLMClient
+
+        text = "Bloch Bloch AG\nRE-2025/8824\nGesamtbetrag 1.190,00 €\n"
+        prompt = f"Extract the invoice fields from this document text:\n\n{text}"
+        recovered = MockLLMClient._document_text([{"role": "user", "content": prompt}])
+        assert plan_corruption(recovered, rate=1.0, seed=9) == plan_corruption(
+            text, rate=1.0, seed=9
+        )

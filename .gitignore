@@ -13,3 +13,6 @@ data/synth/out/
 
 # macOS
 .DS_Store
+
+# Calibration dataset provenance is committed; the labels sidecar is derived
+data/calibration/

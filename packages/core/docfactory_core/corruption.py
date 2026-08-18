@@ -25,8 +25,10 @@ number and hides the ceiling.
 import hashlib
 import random
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal
+
+from docfactory_core.normalize import normalize_amount, normalize_date
 
 ERROR_CLASSES = (
     "arithmetic_drift",  # total no longer equals subtotal + tax
@@ -73,8 +75,16 @@ class Corruption:
 
 
 def document_key(text: str) -> str:
-    """Stable identity for a document, independent of processing order."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    """Stable identity for a document, independent of processing order.
+
+    Whitespace-stripped deliberately. The prompt wraps the document text
+    ("...from this document text:\n\n{text}") and the mock recovers it by
+    splitting on that marker, which leaves a leading newline. Hashing the raw
+    string would then give the caller and the client different keys, so a
+    study recording "no corruption" could sit next to a client that applied
+    one — silently mislabelling the very rows the fit is trained on.
+    """
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()[:16]
 
 
 def plan_corruption(text: str, *, rate: float, seed: int) -> Corruption | None:
@@ -103,7 +113,10 @@ def apply_corruption(payload: dict, corruption: Corruption | None, *, seed: int)
 
 
 def _drift_total(payload: dict, rng: random.Random) -> None:
-    total = Decimal(str(payload["total"]))
+    # The mock emits values as printed ("$1,224.26", "25.832,09 €"); Pydantic
+    # canonicalizes later. Corruption runs before that, so normalize here and
+    # write back canonical form (which the schema also accepts).
+    total = normalize_amount(payload["total"])
     # Big enough to clear the validator's one-cent tolerance, small enough to
     # look like a misread digit rather than a different document.
     magnitude = max(total * Decimal(str(rng.uniform(0.005, 0.05))), Decimal("1.00"))
@@ -140,7 +153,7 @@ def _transpose_line_amounts(payload: dict, rng: random.Random) -> None:
 def _shift_date(payload: dict, rng: random.Random) -> None:
     # Shift the invoice date *earlier* only: due_date stays later, so
     # due_date >= invoice_date still holds and no rule fires.
-    issued = date.fromisoformat(str(payload["invoice_date"]))
+    issued = normalize_date(payload["invoice_date"])
     payload["invoice_date"] = (issued - timedelta(days=rng.randint(3, 20))).isoformat()
 
 
