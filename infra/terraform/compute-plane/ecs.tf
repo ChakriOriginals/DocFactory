@@ -35,34 +35,34 @@ resource "aws_cloudwatch_log_group" "migrate" {
 }
 
 locals {
-  image_api    = "${aws_ecr_repository.api.repository_url}:${var.image_tag}"
-  image_worker = "${aws_ecr_repository.worker.repository_url}:${var.image_tag}"
+  image_api    = "${local.data_plane.ecr_repositories.api}:${var.image_tag}"
+  image_worker = "${local.data_plane.ecr_repositories.worker}:${var.image_tag}"
 
   # Endpoints are the only thing that changes between compose and AWS: the code
   # has taken them from the environment since Phase 0. Unset S3/SQS endpoints
   # mean "use real AWS", which is exactly what these tasks want.
   common_environment = [
     { name = "AWS_REGION", value = var.aws_region },
-    { name = "S3_BUCKET", value = aws_s3_bucket.documents.id },
-    { name = "INGEST_QUEUE", value = aws_sqs_queue.main["ingest"].name },
-    { name = "PARSE_QUEUE", value = aws_sqs_queue.main["parse"].name },
-    { name = "EXTRACT_QUEUE", value = aws_sqs_queue.main["extract"].name },
-    { name = "MAX_RECEIVE_COUNT", value = tostring(local.max_receive_count) },
+    { name = "S3_BUCKET", value = local.data_plane.documents_bucket },
+    { name = "INGEST_QUEUE", value = local.data_plane.queue_names.ingest },
+    { name = "PARSE_QUEUE", value = local.data_plane.queue_names.parse },
+    { name = "EXTRACT_QUEUE", value = local.data_plane.queue_names.extract },
+    { name = "MAX_RECEIVE_COUNT", value = tostring(local.data_plane.max_receive_count) },
     # Terraform owns the bucket and the queues here, and the task roles have no
     # rights to create either. The app verifies and fails loudly instead.
     { name = "INFRA_MODE", value = "assert" },
     # Mock is the deployed default. A real-model run is a deliberate,
     # temporary variable change — never the state the stack sits in.
     { name = "MODEL_PROVIDER", value = var.model_provider },
-    { name = "DEFAULT_TENANT_ID", value = "dev-tenant" },
+    { name = "DEFAULT_TENANT_ID", value = var.default_tenant_id },
     # On AWS, S3 publishes events straight to SQS: the local webhook bridge
     # has no counterpart here, and the notification target is the queue.
     { name = "INGEST_NOTIFY_TARGET", value = "" },
   ]
 
   common_secrets = [
-    { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url_app.arn },
-    { name = "ANTHROPIC_API_KEY", valueFrom = aws_secretsmanager_secret.anthropic_api_key.arn },
+    { name = "DATABASE_URL", valueFrom = local.data_plane.secret_arns.database_url_app },
+    { name = "ANTHROPIC_API_KEY", valueFrom = local.data_plane.secret_arns.anthropic_api_key },
   ]
 }
 
@@ -72,8 +72,8 @@ resource "aws_ecs_task_definition" "api" {
   network_mode             = "awsvpc"
   cpu                      = var.task_cpu
   memory                   = var.task_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.api_task.arn
+  execution_role_arn       = local.data_plane.task_execution_role_arn
+  task_role_arn            = local.data_plane.api_task_role_arn
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -114,8 +114,8 @@ resource "aws_ecs_task_definition" "worker" {
   network_mode             = "awsvpc"
   cpu                      = var.task_cpu
   memory                   = var.task_memory
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.worker_task.arn
+  execution_role_arn       = local.data_plane.task_execution_role_arn
+  task_role_arn            = local.data_plane.worker_task_role_arn
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -148,8 +148,8 @@ resource "aws_ecs_task_definition" "migrate" {
   network_mode             = "awsvpc"
   cpu                      = 512
   memory                   = 1024
-  execution_role_arn       = aws_iam_role.task_execution.arn
-  task_role_arn            = aws_iam_role.api_task.arn
+  execution_role_arn       = local.data_plane.task_execution_role_arn
+  task_role_arn            = local.data_plane.api_task_role_arn
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -165,8 +165,8 @@ resource "aws_ecs_task_definition" "migrate" {
     environment = local.common_environment
     secrets = [
       # Alembic connects as the owner; the app role must never hold DDL rights.
-      { name = "DATABASE_ADMIN_URL", valueFrom = aws_secretsmanager_secret.database_url_owner.arn },
-      { name = "DATABASE_URL", valueFrom = aws_secretsmanager_secret.database_url_app.arn },
+      { name = "DATABASE_ADMIN_URL", valueFrom = local.data_plane.secret_arns.database_url_owner },
+      { name = "DATABASE_URL", valueFrom = local.data_plane.secret_arns.database_url_app },
     ]
 
     logConfiguration = {

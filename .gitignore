@@ -17,9 +17,10 @@ data/synth/out/
 # Calibration dataset provenance is committed; the labels sidecar is derived
 data/calibration/
 
-# Terraform
-infra/terraform/.terraform/
-infra/terraform/*.tfstate
-infra/terraform/*.tfstate.*
-infra/terraform/terraform.tfvars
-infra/terraform/.terraform.lock.hcl
+# Terraform — patterns are recursive since the config split into
+# data-plane/ and compute-plane/ root modules (4c.5a).
+infra/terraform/**/.terraform/
+infra/terraform/**/*.tfstate
+infra/terraform/**/*.tfstate.*
+infra/terraform/**/terraform.tfvars
+infra/terraform/**/.terraform.lock.hcl

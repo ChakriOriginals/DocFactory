@@ -97,7 +97,7 @@ resource "aws_cloudwatch_metric_alarm" "backlog" {
   comparison_operator = "GreaterThanOrEqualToThreshold"
   treat_missing_data  = "notBreaching"
 
-  dimensions = { QueueName = aws_sqs_queue.main["extract"].name }
+  dimensions = { QueueName = local.data_plane.queue_names.extract }
 
   alarm_actions = [aws_appautoscaling_policy.worker_scale_out.arn]
 }
@@ -117,7 +117,7 @@ resource "aws_cloudwatch_metric_alarm" "idle_visible" {
   comparison_operator = "LessThanThreshold"
   treat_missing_data  = "notBreaching"
 
-  dimensions = { QueueName = aws_sqs_queue.main["extract"].name }
+  dimensions = { QueueName = local.data_plane.queue_names.extract }
 }
 
 resource "aws_cloudwatch_metric_alarm" "idle_in_flight" {
@@ -131,7 +131,7 @@ resource "aws_cloudwatch_metric_alarm" "idle_in_flight" {
   comparison_operator = "LessThanThreshold"
   treat_missing_data  = "notBreaching"
 
-  dimensions = { QueueName = aws_sqs_queue.main["extract"].name }
+  dimensions = { QueueName = local.data_plane.queue_names.extract }
 }
 
 resource "aws_cloudwatch_composite_alarm" "worker_idle" {

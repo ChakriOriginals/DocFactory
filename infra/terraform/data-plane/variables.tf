@@ -1,5 +1,7 @@
+# --- naming and placement ---------------------------------------------------
+
 variable "aws_region" {
-  description = "Region for every resource in this stack."
+  description = "Region for every resource in this layer."
   type        = string
   default     = "us-east-1"
 }
@@ -17,12 +19,12 @@ variable "owner" {
 }
 
 variable "name_prefix" {
-  description = "Prefix for resource names."
+  description = "Prefix for resource names. The compute layer asserts it matches."
   type        = string
   default     = "docfactory"
 }
 
-# --- data plane -------------------------------------------------------------
+# --- storage ----------------------------------------------------------------
 
 variable "documents_bucket_name" {
   description = <<-EOT
@@ -47,6 +49,8 @@ variable "force_destroy_documents" {
   type        = bool
   default     = false
 }
+
+# --- secrets ----------------------------------------------------------------
 
 variable "neon_database_url_owner" {
   description = <<-EOT
@@ -79,44 +83,6 @@ variable "anthropic_api_key" {
   default     = ""
 }
 
-# --- compute ----------------------------------------------------------------
-
-variable "api_desired_count" {
-  description = "API tasks. One is enough for a demo stack; the ALB is the cost, not the task."
-  type        = number
-  default     = 1
-}
-
-variable "worker_min_count" {
-  description = "Minimum worker tasks. 0 means an idle stack runs no workers at all."
-  type        = number
-  default     = 0
-}
-
-variable "worker_max_count" {
-  description = "Ceiling on worker fan-out under backlog."
-  type        = number
-  default     = 6
-}
-
-variable "task_cpu" {
-  description = "Fargate CPU units per task (256 = 0.25 vCPU)."
-  type        = number
-  default     = 512
-}
-
-variable "task_memory" {
-  description = "Fargate memory (MiB) per task."
-  type        = number
-  default     = 1024
-}
-
-variable "log_retention_days" {
-  description = "CloudWatch log retention. Log groups are a silent forever-cost without it."
-  type        = number
-  default     = 7
-}
-
 # --- CI ---------------------------------------------------------------------
 
 variable "github_repository" {
@@ -141,30 +107,28 @@ variable "github_oidc_provider_arn" {
   default     = ""
 }
 
-variable "image_tag" {
-  description = <<-EOT
-    Image tag the services run.
+# --- local emulation --------------------------------------------------------
 
-    CI pushes the git SHA and updates the service; "latest" is the bootstrap
-    value for the first apply, before any image exists.
+variable "localstack_endpoint" {
+  description = <<-EOT
+    LocalStack endpoint (e.g. "http://localhost:4566"). Empty = real AWS.
+
+    Set ONLY by the local validation run (see infra/localstack/). When set, the
+    provider also pins credentials to dummy values, so this layer cannot reach
+    a real account by accident.
+
+    What a green LocalStack apply proves: the resources, their ARNs, their
+    dependency order, the S3 -> SQS notification configuration and the queues'
+    RedrivePolicy. What it does NOT prove: that the IAM policies below are
+    sufficient. LocalStack Community creates IAM objects but does not enforce
+    them, so every call succeeds regardless of policy. See 4c.5c in
+    docs/deploy_runbook.md for the static cross-check that covers the gap.
   EOT
   type        = string
-  default     = "latest"
-}
-
-variable "model_provider" {
-  description = <<-EOT
-    "mock" or "anthropic". THE DEPLOYED DEFAULT IS MOCK.
-
-    A real-model run is a deliberate, temporary change — flip it, run a handful
-    of documents, flip it back. Leaving a deployed stack on "anthropic" is how
-    a demo becomes a bill.
-  EOT
-  type        = string
-  default     = "mock"
+  default     = ""
 
   validation {
-    condition     = contains(["mock", "anthropic"], var.model_provider)
-    error_message = "model_provider must be \"mock\" or \"anthropic\"."
+    condition     = var.localstack_endpoint == "" || can(regex("^https?://", var.localstack_endpoint))
+    error_message = "localstack_endpoint must be empty or an http(s) URL."
   }
 }

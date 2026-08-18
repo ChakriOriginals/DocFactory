@@ -20,7 +20,6 @@ data "aws_availability_zones" "available" {
 }
 
 locals {
-  name = "${var.name_prefix}-${var.environment}"
   # Two AZs: the ALB requires two subnets, and one AZ is not a deployment.
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
 }
