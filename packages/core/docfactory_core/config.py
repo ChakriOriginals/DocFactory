@@ -63,6 +63,11 @@ class Settings(BaseSettings):
 
     max_upload_mb: int = 25
 
+    # Fitted confidence model consumed by routing. The threshold lives inside
+    # this file, never in code, so a refit changes behaviour by swapping the
+    # config. Point at a different version to roll forward or back.
+    confidence_model_path: str = "config/confidence_model_v2.json"
+
     phoenix_collector_endpoint: str = "http://localhost:6006"
 
     default_tenant_id: str = "dev-tenant"

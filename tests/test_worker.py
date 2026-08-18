@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import pytest
+from docfactory_core.confidence_model import get_confidence_model
 from docfactory_core.config import get_settings
 from docfactory_core.db import session_scope
 from docfactory_core.models import Document, DocumentStatus, Extraction
@@ -80,7 +81,7 @@ def _status(document_id: uuid.UUID) -> Document:
         return session.get(Document, document_id)
 
 
-def test_digital_document_flows_to_extracted(stack):
+def test_digital_document_flows_to_a_routed_terminal_state(stack):
     store, _ = stack
     from docfactory_worker.handlers import handle_extract, handle_parse
 
@@ -95,7 +96,9 @@ def test_digital_document_flows_to_extracted(stack):
 
     handle_extract(payload)
     extracted = _status(document.id)
-    assert extracted.status == DocumentStatus.EXTRACTED
+    # Since 2.3b the terminal state is the routing decision. This fixture is
+    # extracted cleanly by the mock, so it should clear the threshold.
+    assert extracted.status == DocumentStatus.APPROVED
     assert extracted.extracted_at is not None
 
     with session_scope() as session:
@@ -198,8 +201,12 @@ def test_confidence_is_persisted_end_to_end(stack):
             .order_by(Extraction.created_at.desc())
         ).first()
         assert extraction is not None
-        # mock mode extracts this cleanly, so it should score at the top
-        assert float(extraction.doc_confidence) == 1.0
+        # doc_confidence is the calibrated probability of the weakest field,
+        # so it is directly comparable to the model's threshold.
+        model = get_confidence_model()
+        assert float(extraction.doc_confidence) >= model.threshold
+        assert extraction.routing_decision == "approved"
+        assert extraction.confidence_model_version == model.version
         signals = extraction.confidence_signals
         assert signals["attempts"] == 1
         assert signals["rule.subtotal_plus_tax_equals_total"] is True
@@ -212,3 +219,54 @@ def test_confidence_is_persisted_end_to_end(stack):
         # every stored field carries a score, line-item cells included
         assert all(value is not None for value in scored.values())
         assert float(scored["line_items.0.amount"]) == float(scored["line_items.count"])
+
+
+def test_routing_sends_a_low_confidence_document_to_review(stack):
+    """A corrupted extraction must land in needs_review, not approved.
+
+    Uses the 2.2b corruption machinery rather than a hand-built row, so the
+    path exercised is the real one: mock extraction -> score -> route.
+    """
+    import os
+
+    from docfactory_core.config import get_settings
+    from docfactory_core.llm import MockLLMClient
+
+    store, _ = stack
+    from docfactory_worker.handlers import handle_parse
+
+    document = _ingest(store, "digital_classic.pdf")
+    payload = {"document_id": str(document.id)}
+    handle_parse(payload)
+
+    # Force corruption on for this one extraction, then restore.
+    previous = os.environ.get("MOCK_CORRUPTION_RATE")
+    os.environ["MOCK_CORRUPTION_RATE"] = "1.0"
+    get_settings.cache_clear()
+    try:
+        import docfactory_worker.handlers as handlers
+
+        corrupting = MockLLMClient()
+        original = handlers.get_llm_client
+        handlers.get_llm_client = lambda: corrupting
+        try:
+            handlers.handle_extract(payload)
+        finally:
+            handlers.get_llm_client = original
+    finally:
+        if previous is None:
+            os.environ.pop("MOCK_CORRUPTION_RATE", None)
+        else:
+            os.environ["MOCK_CORRUPTION_RATE"] = previous
+        get_settings.cache_clear()
+
+    routed = _status(document.id)
+    assert routed.status in (DocumentStatus.APPROVED, DocumentStatus.NEEDS_REVIEW)
+    with session_scope() as session:
+        extraction = session.scalars(
+            select(Extraction)
+            .where(Extraction.document_id == document.id)
+            .order_by(Extraction.created_at.desc())
+        ).first()
+        assert extraction.routing_decision == routed.status
+        assert extraction.confidence_model_version == get_confidence_model().version

@@ -22,6 +22,11 @@ import uuid
 from datetime import UTC, datetime
 
 from docfactory_core.confidence import ConfidenceReport, failed_extraction_report, score_extraction
+from docfactory_core.confidence_model import (
+    RoutingDecision,
+    get_confidence_model,
+    route_extraction,
+)
 from docfactory_core.config import get_settings
 from docfactory_core.db import session_scope
 from docfactory_core.extraction import ExtractionOutcome, run_extraction
@@ -173,18 +178,32 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
             ]:
                 score_span.set_attribute(f"confidence.field.{name}", entry.confidence)
 
-        _store_extraction(document_id, tenant_id, outcome, outcome.invoice, validation, confidence)
-        span.set_attribute("outcome", "extracted")
+        # Routing consumes the calibrated model; the threshold comes from the
+        # config file, never from code (2.3b).
+        with tracer.start_as_current_span("extraction.route") as route_span:
+            route_span.set_attribute("openinference.span.kind", "CHAIN")
+            routing = route_extraction(confidence.signals, get_confidence_model())
+            route_span.set_attribute("routing.decision", routing.decision)
+            route_span.set_attribute("routing.threshold", routing.threshold)
+            route_span.set_attribute("routing.model_version", routing.model_version)
+            route_span.set_attribute("routing.flagged_fields", list(routing.flagged_fields))
+
+        _store_extraction(
+            document_id, tenant_id, outcome, outcome.invoice, validation, confidence, routing
+        )
+        span.set_attribute("outcome", routing.decision)
         span.set_attribute("validation.passed", all(validation.values()))
-        span.set_attribute("confidence.doc", confidence.doc_confidence)
+        span.set_attribute("confidence.doc", routing.doc_confidence)
         log.info(
             "extracted",
             extra={
                 "model": outcome.model,
                 "attempts": outcome.attempts,
                 "validation_passed": all(validation.values()),
-                "doc_confidence": confidence.doc_confidence,
-                "confidence_reasons": list(confidence.reasons),
+                "doc_confidence": routing.doc_confidence,
+                "routing_decision": routing.decision,
+                "flagged_fields": list(routing.flagged_fields),
+                "confidence_model_version": routing.model_version,
             },
         )
 
@@ -196,6 +215,7 @@ def _store_extraction(
     invoice: Invoice | None,
     validation: dict[str, bool] | None,
     confidence: ConfidenceReport,
+    routing: RoutingDecision | None = None,
 ) -> None:
     with session_scope() as session:
         extraction = Extraction(
@@ -207,7 +227,9 @@ def _store_extraction(
             else {"raw": outcome.raw_output, "error": outcome.error},
             validation=validation,
             validation_passed=all(validation.values()) if validation else False,
-            doc_confidence=confidence.doc_confidence,
+            doc_confidence=routing.doc_confidence if routing else confidence.doc_confidence,
+            routing_decision=routing.decision if routing else None,
+            confidence_model_version=routing.model_version if routing else None,
             confidence_signals=confidence.signals,
             prompt_tokens=outcome.input_tokens,
             completion_tokens=outcome.output_tokens,
@@ -223,11 +245,15 @@ def _store_extraction(
                         tenant_id=tenant_id,
                         name=name,
                         value=value,
-                        confidence=confidence.field_confidence(name),
+                        confidence=_field_score(name, routing, confidence),
                     )
                 )
             document = session.get(Document, document_id, with_for_update=True)
-            document.status = DocumentStatus.EXTRACTED
+            # Routing decides the terminal state; EXTRACTED remains the
+            # pre-routing state for callers that score without routing.
+            document.status = (
+                DocumentStatus(routing.decision) if routing else DocumentStatus.EXTRACTED
+            )
             document.extracted_at = datetime.now(UTC)
 
 
@@ -253,3 +279,17 @@ def _record_failure(document_id: uuid.UUID, error: str, final: bool) -> None:
                 document.status = DocumentStatus.FAILED
     except Exception:
         log.exception("could not record failure on document row")
+
+
+def _field_score(name: str, routing: RoutingDecision | None, confidence: ConfidenceReport):
+    """Calibrated probability when routing ran, else the uncalibrated prior.
+
+    Line-item cells inherit their parent's score, as they do in 2.1.
+    """
+    if routing is None:
+        return confidence.field_confidence(name)
+    if name in routing.field_confidence:
+        return routing.field_confidence[name]
+    if name.startswith("line_items"):
+        return routing.field_confidence.get("line_items")
+    return None

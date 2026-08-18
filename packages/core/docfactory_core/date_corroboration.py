@@ -69,7 +69,7 @@ def dates_in_text(text: str) -> set[date]:
     """
     found: set[date] = set()
 
-    for first, separator, second, year in _NUMERIC_DATE.findall(text):
+    for first, _separator, second, year in _NUMERIC_DATE.findall(text):
         a, b, y = int(first), int(second), int(year)
         # "/" is month-first in this corpus, "." is day-first; keep both anyway.
         for month, day in ((a, b), (b, a)):

@@ -43,6 +43,11 @@ class DocumentStatus(enum.StrEnum):
     # Terminal, *expected* outcome for image-only PDFs until the OCR tier
     # exists. Deliberately distinct from FAILED: nothing went wrong.
     NEEDS_OCR = "needs_ocr"
+    # Post-extraction routing outcomes (2.3b). Adding these is a one-line
+    # change to the CHECK constraint precisely because status is a string
+    # column rather than a native Postgres enum.
+    APPROVED = "approved"
+    NEEDS_REVIEW = "needs_review"
     FAILED = "failed"
 
 
@@ -117,7 +122,14 @@ class Extraction(ColumnsMixin, Base):
     # Per-rule deterministic validation results, e.g. {"totals_add_up": true}.
     validation: Mapped[dict | None] = mapped_column(JSONB)
     validation_passed: Mapped[bool | None] = mapped_column(Boolean)
+    # Calibrated probability of the weakest field, so it is directly
+    # comparable to the model's threshold: the document clears it exactly when
+    # every field does. (Before 2.3b this held the uncalibrated prior score.)
     doc_confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    # Which model made the call, so an approval can always be traced to the
+    # weights that approved it.
+    routing_decision: Mapped[str | None] = mapped_column(String(32))
+    confidence_model_version: Mapped[int | None] = mapped_column(Integer)
     # Raw scorer inputs (rule outcomes, residual magnitudes, shape flags).
     # Persisted so confidence weights can be refit offline against the golden
     # set without reprocessing documents — see confidence.py.
