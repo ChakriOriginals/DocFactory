@@ -15,12 +15,13 @@ from docfactory_core.confidence import (
     looks_fragmented,
     score_extraction,
 )
+from docfactory_core.pipeline import evaluate_rules
 from docfactory_core.pipeline_registry import default_pipeline
-from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
-from docfactory_core.validation import validate_invoice
+
+DEFINITION = default_pipeline()
 
 
-def make_invoice(**overrides) -> Invoice:
+def make_invoice(**overrides) -> dict:
     """A clean, internally consistent invoice; override to break one thing."""
     base = {
         "vendor": "Fernandez-Harris",
@@ -47,11 +48,22 @@ def make_invoice(**overrides) -> Invoice:
             },
         ],
     }
-    return Invoice.model_validate(base | overrides)
+    return DEFINITION.normalize(base | overrides)
 
 
-def score(invoice: Invoice, *, attempts: int = 1):
-    return score_extraction(invoice, validate_invoice(invoice), attempts=attempts)
+def score(record: dict, *, attempts: int = 1):
+    return score_extraction(
+        record, evaluate_rules(record, DEFINITION), attempts=attempts, definition=DEFINITION
+    )
+
+
+def score_with_text(record: dict, source_text: str):
+    return score_extraction(
+        record,
+        evaluate_rules(record, DEFINITION),
+        source_text=source_text,
+        definition=DEFINITION,
+    )
 
 
 def test_clean_invoice_scores_full_confidence():
@@ -63,7 +75,7 @@ def test_clean_invoice_scores_full_confidence():
 
 def test_every_scalar_field_and_line_items_are_scored():
     report = score(make_invoice())
-    assert set(report.fields) == {*SCALAR_FIELD_NAMES, "line_items"}
+    assert set(report.fields) == set(DEFINITION.scored_fields)
 
 
 def test_broken_totals_lower_document_confidence():
@@ -74,7 +86,7 @@ def test_broken_totals_lower_document_confidence():
 def test_failed_rule_penalizes_only_the_fields_it_implicates():
     # subtotal + tax != total implicates subtotal, tax, total — not the dates.
     report = score(make_invoice(total="9999.00"))
-    implicated = default_pipeline().rule_fields["subtotal_plus_tax_equals_total"]
+    implicated = DEFINITION.rule_fields["subtotal_plus_tax_equals_total"]
     for name in implicated:
         assert report.fields[name].confidence < 1.0, name
     for name in ("invoice_date", "due_date", "currency", "invoice_number"):
@@ -312,16 +324,14 @@ class TestDateCorroboration:
     NO_DATES = _BODY
 
     def test_dates_printed_on_the_page_score_full_confidence(self):
-        report = score_extraction(
-            make_invoice(), validate_invoice(make_invoice()), source_text=self.SOURCE
-        )
+        report = score_with_text(make_invoice(), self.SOURCE)
         assert report.doc_confidence == 1.0
         assert report.signals["date_corroboration.invoice_date"] == 1.0
 
     def test_a_shifted_invoice_date_is_now_caught(self):
         # 13 days earlier — squarely inside the injected corruption's range.
         shifted = make_invoice(invoice_date="2026-01-04")
-        report = score_extraction(shifted, validate_invoice(shifted), source_text=self.SOURCE)
+        report = score_with_text(shifted, self.SOURCE)
         assert report.doc_confidence < 1.0
         assert report.fields["invoice_date"].confidence < 1.0
         assert any(r.startswith("uncorroborated_date") for r in report.reasons)
@@ -329,36 +339,28 @@ class TestDateCorroboration:
     def test_the_shift_is_invisible_without_the_source_text(self):
         # Documents precisely what the signal buys: identical input, no text.
         shifted = make_invoice(invoice_date="2026-01-04")
-        assert score_extraction(shifted, validate_invoice(shifted)).doc_confidence == 1.0
+        assert score(shifted).doc_confidence == 1.0
 
     def test_every_validation_rule_still_passes_on_the_shifted_date(self):
         # i.e. the arithmetic/date rules genuinely cannot see this error
         shifted = make_invoice(invoice_date="2026-01-04")
-        assert all(validate_invoice(shifted).values())
+        assert all(evaluate_rules(shifted, DEFINITION).values())
 
     def test_correct_dates_are_not_penalized_when_the_page_has_no_dates(self):
-        report = score_extraction(
-            make_invoice(), validate_invoice(make_invoice()), source_text=self.NO_DATES
-        )
+        report = score_with_text(make_invoice(), self.NO_DATES)
         assert report.doc_confidence == 1.0
         assert report.signals["date_corroboration.text_dates_found"] == 0
 
     def test_stated_payment_term_is_corroborated(self):
         source = self.SOURCE + "Zahlbar innerhalb von 30 Tagen ohne Abzug.\n"
-        report = score_extraction(
-            make_invoice(), validate_invoice(make_invoice()), source_text=source
-        )
+        report = score_with_text(make_invoice(), source)
         assert report.signals["date_corroboration.payment_term"] == 1.0
 
     def test_signal_is_continuous_for_the_calibration_fit(self):
-        near = score_extraction(
-            make_invoice(invoice_date="2026-01-16"),
-            validate_invoice(make_invoice(invoice_date="2026-01-16")),
-            source_text=self.SOURCE,
-        ).signals["date_corroboration.invoice_date"]
-        far = score_extraction(
-            make_invoice(invoice_date="2026-01-01"),
-            validate_invoice(make_invoice(invoice_date="2026-01-01")),
-            source_text=self.SOURCE,
-        ).signals["date_corroboration.invoice_date"]
+        near = score_with_text(make_invoice(invoice_date="2026-01-16"), self.SOURCE).signals[
+            "date_corroboration.invoice_date"
+        ]
+        far = score_with_text(make_invoice(invoice_date="2026-01-01"), self.SOURCE).signals[
+            "date_corroboration.invoice_date"
+        ]
         assert 0.0 < far < near < 1.0

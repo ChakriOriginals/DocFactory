@@ -17,7 +17,11 @@ from docfactory_core.corruption import (
     document_key,
     plan_corruption,
 )
-from docfactory_core.schemas import Invoice
+from docfactory_core.extraction import validate_record
+from docfactory_core.pipeline import evaluate_rules
+from docfactory_core.pipeline_registry import default_pipeline
+
+DEFINITION = default_pipeline()
 
 CLEAN = {
     "vendor": "Bloch Bloch AG",
@@ -101,12 +105,12 @@ class TestCorruptionsAreRealisticAndLabelled:
 
     @pytest.mark.parametrize("error_class", ERROR_CLASSES)
     def test_output_still_validates_against_the_schema(self, error_class):
-        # A corruption that fails Pydantic would be rejected before scoring and
-        # would never reach the study — it must look like a plausible answer.
+        # A corruption rejected at the schema boundary would never reach the
+        # study — it must look like a plausible answer.
         payload = json.loads(json.dumps(CLEAN))
         plan = _plan_of_class(error_class)
         corrupted = apply_corruption(payload, plan, seed=4)
-        Invoice.model_validate(corrupted)
+        validate_record(corrupted, DEFINITION)
 
     @pytest.mark.parametrize("error_class", ERROR_CLASSES)
     def test_labelled_fields_actually_change(self, error_class):
@@ -123,8 +127,8 @@ class TestCorruptionsAreRealisticAndLabelled:
         corrupted = apply_corruption(
             json.loads(json.dumps(CLEAN)), _plan_of_class("arithmetic_drift"), seed=4
         )
-        invoice = Invoice.model_validate(corrupted)
-        assert invoice.subtotal + invoice.tax != invoice.total
+        record = validate_record(corrupted, DEFINITION)
+        assert record["subtotal"] + record["tax"] != record["total"]
 
     def test_wrong_vendor_is_not_present_in_the_source_text(self):
         from docfactory_core.groundedness import is_grounded
@@ -162,10 +166,8 @@ class TestCorruptionsAreRealisticAndLabelled:
         corrupted = apply_corruption(
             json.loads(json.dumps(CLEAN)), _plan_of_class("shifted_date"), seed=4
         )
-        invoice = Invoice.model_validate(corrupted)
-        from docfactory_core.validation import validate_invoice
-
-        assert all(validate_invoice(invoice).values())
+        record = validate_record(corrupted, DEFINITION)
+        assert all(evaluate_rules(record, DEFINITION).values())
         assert corrupted["invoice_date"] != CLEAN["invoice_date"]
 
 
@@ -187,7 +189,7 @@ class TestLocalizedMockOutput:
     """Corruption runs on raw mock output, which is localized, not canonical.
 
     The mock emits amounts and dates as printed ("$1,224.26", "25.832,09 €",
-    "06/06/2026") because Pydantic canonicalizes them downstream. Corruption
+    "06/06/2026") because the runner canonicalizes them downstream. Corruption
     happens before that boundary, so it must normalize its own inputs.
     """
 
@@ -197,14 +199,14 @@ class TestLocalizedMockOutput:
     def test_arithmetic_drift_handles_printed_amounts(self, total, currency):
         payload = json.loads(json.dumps(CLEAN)) | {"total": total, "currency": currency}
         corrupted = apply_corruption(payload, _plan_of_class("arithmetic_drift"), seed=4)
-        Invoice.model_validate(corrupted)  # must remain schema-valid
+        validate_record(corrupted, DEFINITION)  # must remain schema-valid
 
     @pytest.mark.parametrize("issued", ["06/06/2026", "25.12.2024", "Jan 17, 2026", "2025-11-10"])
     def test_shifted_date_handles_printed_dates(self, issued):
         payload = json.loads(json.dumps(CLEAN)) | {"invoice_date": issued, "due_date": "2027-01-01"}
         corrupted = apply_corruption(payload, _plan_of_class("shifted_date"), seed=4)
-        invoice = Invoice.model_validate(corrupted)
-        assert invoice.due_date >= invoice.invoice_date
+        record = validate_record(corrupted, DEFINITION)
+        assert record["due_date"] >= record["invoice_date"]
 
 
 class TestDocumentKeyStability:
@@ -218,11 +220,11 @@ class TestDocumentKeyStability:
         assert plan_corruption(text, rate=1.0, seed=3) == plan_corruption(wrapped, rate=1.0, seed=3)
 
     def test_the_client_and_a_caller_agree_on_the_plan(self):
-        from docfactory_core.extraction import SYSTEM_PROMPT  # noqa: F401
+        from docfactory_core.extraction import build_user_message
         from docfactory_core.llm import MockLLMClient
 
         text = "Bloch Bloch AG\nRE-2025/8824\nGesamtbetrag 1.190,00 €\n"
-        prompt = f"Extract the invoice fields from this document text:\n\n{text}"
+        prompt = build_user_message(text, DEFINITION)
         recovered = MockLLMClient._document_text([{"role": "user", "content": prompt}])
         assert plan_corruption(recovered, rate=1.0, seed=9) == plan_corruption(
             text, rate=1.0, seed=9

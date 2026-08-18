@@ -20,6 +20,7 @@ up in a worker later.
 
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
@@ -66,6 +67,11 @@ class FieldSpec:
     # ENUM only.
     values: tuple[str, ...] = ()
     pattern: str | None = None
+    # MONEY/QUANTITY/RATE only: a value at or below zero is implausible for
+    # this field. An invoice total qualifies; its tax does not (a zero-rated
+    # invoice is ordinary), which is why this is per-field config and not a
+    # property of the money kind.
+    positive: bool = False
 
     @property
     def is_free_text(self) -> bool:
@@ -95,6 +101,11 @@ class PipelineDefinition:
     fields: dict[str, FieldSpec]
     rules: tuple[RuleSpec, ...]
     json_schema: dict
+    # Document-type-specific prompt guidance. The generic, kind-derived rules
+    # (dates are ISO, money is a plain decimal string) are built from the field
+    # kinds; this carries what only this document type knows.
+    prompt_intro: str = ""
+    prompt_field_notes: dict[str, str] = field(default_factory=dict)
     confidence_model_path: str | None = None
     sla_hours: float | None = None
 
@@ -103,6 +114,15 @@ class PipelineDefinition:
     @property
     def scored_fields(self) -> tuple[str, ...]:
         return tuple(self.fields)
+
+    @property
+    def scalar_fields(self) -> tuple[str, ...]:
+        """Every non-table field, in declaration order (the report order)."""
+        return tuple(n for n, spec in self.fields.items() if spec.kind is not FieldKind.TABLE)
+
+    @property
+    def positive_fields(self) -> tuple[str, ...]:
+        return tuple(n for n, spec in self.fields.items() if spec.positive)
 
     @property
     def text_fields(self) -> tuple[str, ...]:
@@ -130,6 +150,24 @@ class PipelineDefinition:
         if spec is None or value is None:
             return value
         return _normalize_by_kind(spec, value)
+
+
+def json_record(record: dict) -> Any:
+    """JSON-safe view of a normalized record.
+
+    Decimals become plain strings and dates ISO-8601 — the same canonical
+    forms the ground truth uses, so a stored extraction can be compared to a
+    label without re-parsing.
+    """
+    if isinstance(record, dict):
+        return {key: json_record(value) for key, value in record.items()}
+    if isinstance(record, list):
+        return [json_record(item) for item in record]
+    if isinstance(record, Decimal):
+        return str(record)
+    if isinstance(record, date):
+        return record.isoformat()
+    return record
 
 
 def _normalize_by_kind(spec: FieldSpec, value: Any) -> Any:
@@ -186,6 +224,8 @@ def parse_definition(tenant_id: str, slug: str, version: int, config: dict) -> P
             f"extraction_schema declares properties with no field kind: {sorted(unknown)}"
         )
 
+    prompt_intro, prompt_field_notes = _parse_prompt(config.get("prompt", {}), fields)
+
     return PipelineDefinition(
         tenant_id=tenant_id,
         slug=slug,
@@ -194,9 +234,28 @@ def parse_definition(tenant_id: str, slug: str, version: int, config: dict) -> P
         fields=fields,
         rules=rules,
         json_schema=schema,
+        prompt_intro=prompt_intro,
+        prompt_field_notes=prompt_field_notes,
         confidence_model_path=config.get("confidence", {}).get("model_path"),
         sla_hours=config.get("sla_hours"),
     )
+
+
+def _parse_prompt(prompt: Any, fields: dict[str, FieldSpec]) -> tuple[str, dict[str, str]]:
+    """The prompt block: an intro line plus per-field notes.
+
+    A note for a field the definition does not declare is a config error, not
+    a silently ignored key — the same standard the rules are held to.
+    """
+    if not isinstance(prompt, dict):
+        raise PipelineConfigError("prompt must be an object")
+    notes = prompt.get("field_notes", {})
+    if not isinstance(notes, dict):
+        raise PipelineConfigError("prompt.field_notes must be an object")
+    unknown = sorted(set(notes) - set(fields))
+    if unknown:
+        raise PipelineConfigError(f"prompt.field_notes names unknown fields: {unknown}")
+    return str(prompt.get("intro", "")), {name: str(note) for name, note in notes.items()}
 
 
 def _parse_field(name: str, spec: Any) -> FieldSpec:
@@ -228,6 +287,10 @@ def _parse_field(name: str, spec: Any) -> FieldSpec:
         except re.error as exc:
             raise PipelineConfigError(f"field {name!r} has an invalid pattern: {exc}") from exc
 
+    positive = bool(spec.get("positive", False))
+    if positive and kind not in (FieldKind.MONEY, FieldKind.QUANTITY, FieldKind.RATE):
+        raise PipelineConfigError(f"field {name!r} of kind {kind.value!r} cannot be positive")
+
     return FieldSpec(
         name=name,
         kind=kind,
@@ -235,6 +298,7 @@ def _parse_field(name: str, spec: Any) -> FieldSpec:
         item_fields=item_fields,
         values=values,
         pattern=pattern,
+        positive=positive,
     )
 
 
@@ -263,9 +327,25 @@ def _parse_rule(entry: Any, fields: dict[str, FieldSpec]) -> RuleSpec:
 # --------------------------------------------------------------------------
 
 
+def is_row_rule(rule: RuleSpec) -> bool:
+    """True for a rule evaluated once per row of a table rather than per document."""
+    return rule.type == "product_equals" and "items" in rule.params
+
+
 def evaluate_rules(record: dict, definition: PipelineDefinition) -> dict[str, bool]:
-    """Run the pipeline's validation rules over a normalized record."""
-    return {rule.name: _evaluate(rule, record, definition) for rule in definition.rules}
+    """Run the pipeline's document-level validation rules over a normalized record.
+
+    Per-row rules are deliberately absent: `inconsistent_rows` reports them
+    per row, which localizes the fault to a line rather than collapsing it to
+    one document boolean. Reporting them here as well would enter the same
+    evidence twice into the confidence model's feature vector — once as an
+    implicating rule failure, once as `row_arithmetic_broken`.
+    """
+    return {
+        rule.name: _evaluate(rule, record, definition)
+        for rule in definition.rules
+        if not is_row_rule(rule)
+    }
 
 
 def residuals(record: dict, definition: PipelineDefinition) -> dict[str, float]:

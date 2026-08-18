@@ -35,14 +35,17 @@ from docfactory_core.extraction import ExtractionOutcome, run_extraction
 from docfactory_core.llm import get_llm_client
 from docfactory_core.models import Document, DocumentStatus, Extraction, ExtractionField
 from docfactory_core.parsing import extract_pdf_text
-from docfactory_core.pipeline import PipelineDefinition
-from docfactory_core.pipeline_registry import default_pipeline
+from docfactory_core.pipeline import (
+    PipelineConfigError,
+    PipelineDefinition,
+    evaluate_rules,
+    json_record,
+)
+from docfactory_core.pipeline_registry import default_pipeline, load_from_file
 from docfactory_core.queues import QueueBroker
 from docfactory_core.review import ensure_review_task
-from docfactory_core.schemas import SCALAR_FIELD_NAMES, Invoice
 from docfactory_core.storage import ObjectStore
 from docfactory_core.tracing import extract_trace_context, inject_trace_context
-from docfactory_core.validation import validate_invoice
 from opentelemetry import trace
 
 log = logging.getLogger(__name__)
@@ -140,10 +143,6 @@ def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool =
 @tenant_scoped
 def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
-    # The pipeline definition decides the schema, the rules, and which signals
-    # apply to which field. A message may name one; otherwise the tenant's
-    # default applies.
-    definition = default_pipeline()
     store, _ = _clients()
 
     with tracer.start_as_current_span(
@@ -168,6 +167,14 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
                 return
             document.status = DocumentStatus.EXTRACTING
             tenant_id, text_key = document.tenant_id, document.text_s3_key
+            doc_type = document.doc_type
+
+        # The pipeline definition decides the schema, the prompt, the rules,
+        # and which signals apply to which field. It is reached from the
+        # document's own type — pipelines are tenant-owned, and the tenant is
+        # already bound for this handler.
+        definition = _definition_for(doc_type)
+        span.set_attribute("pipeline.slug", definition.slug)
 
         # Budget gate before the model call: the point is not to spend the
         # money, so checking afterwards would be too late.
@@ -188,13 +195,13 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
 
         try:
             text = store.get_object(text_key).decode("utf-8")
-            outcome = run_extraction(text, get_llm_client())
+            outcome = run_extraction(text, get_llm_client(), definition)
         except Exception as exc:
             _record_failure(document_id, f"extract: {exc}", final_attempt)
             span.set_attribute("outcome", "error")
             raise
 
-        if outcome.invoice is None:
+        if outcome.record is None:
             # Semantic failure after the schema retry: store the raw attempt
             # for debugging, mark failed, acknowledge (an identical re-run
             # would fail the same way — this is not a transport error).
@@ -202,9 +209,10 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
                 document_id,
                 tenant_id,
                 outcome,
-                invoice=None,
+                record=None,
                 validation=None,
                 confidence=failed_extraction_report(outcome.error),
+                definition=definition,
             )
             _record_failure(document_id, f"extraction invalid: {outcome.error}", final=True)
             span.set_attribute("outcome", "invalid_extraction")
@@ -212,14 +220,14 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
 
         with tracer.start_as_current_span("extraction.validate") as validate_span:
             validate_span.set_attribute("openinference.span.kind", "CHAIN")
-            validation = validate_invoice(outcome.invoice)
+            validation = evaluate_rules(outcome.record, definition)
             for rule, passed in validation.items():
                 validate_span.set_attribute(f"validation.{rule}", passed)
 
         with tracer.start_as_current_span("extraction.score") as score_span:
             score_span.set_attribute("openinference.span.kind", "CHAIN")
             confidence = score_extraction(
-                outcome.invoice,
+                outcome.record,
                 validation,
                 attempts=outcome.attempts,
                 source_text=text,
@@ -247,7 +255,7 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
             document_id,
             tenant_id,
             outcome,
-            outcome.invoice,
+            outcome.record,
             validation,
             confidence,
             routing,
@@ -270,11 +278,27 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
         )
 
 
+def _definition_for(doc_type: str | None) -> PipelineDefinition:
+    """The pipeline for a document's declared type, or the tenant's default.
+
+    The type was validated against the available definitions when the document
+    was accepted; a row that predates a definition being retired still resolves
+    to something runnable rather than wedging the queue.
+    """
+    if not doc_type:
+        return default_pipeline()
+    try:
+        return load_from_file(doc_type)
+    except PipelineConfigError:
+        log.warning("no pipeline for doc_type; using default", extra={"doc_type": doc_type})
+        return default_pipeline()
+
+
 def _store_extraction(
     document_id: uuid.UUID,
     tenant_id: str,
     outcome: ExtractionOutcome,
-    invoice: Invoice | None,
+    record: dict | None,
     validation: dict[str, bool] | None,
     confidence: ConfidenceReport,
     routing: RoutingDecision | None = None,
@@ -288,8 +312,8 @@ def _store_extraction(
             document_id=document_id,
             tenant_id=tenant_id,
             model=outcome.model,
-            output=invoice.model_dump(mode="json")
-            if invoice
+            output=json_record(record)
+            if record is not None
             else {"raw": outcome.raw_output, "error": outcome.error},
             validation=validation,
             validation_passed=all(validation.values()) if validation else False,
@@ -306,15 +330,15 @@ def _store_extraction(
         )
         session.add(extraction)
         session.flush()
-        if invoice is not None:
-            for name, value in _flatten_fields(invoice).items():
+        if record is not None:
+            for name, value in _flatten_fields(record, definition).items():
                 session.add(
                     ExtractionField(
                         extraction_id=extraction.id,
                         tenant_id=tenant_id,
                         name=name,
                         value=value,
-                        confidence=_field_score(name, routing, confidence),
+                        confidence=_field_score(name, routing, confidence, definition),
                     )
                 )
             document = session.get(Document, document_id, with_for_update=True)
@@ -336,13 +360,20 @@ def _store_extraction(
         ensure_review_task(queued_for_review, flagged_fields=flagged)
 
 
-def _flatten_fields(invoice: Invoice) -> dict[str, str]:
-    dumped = invoice.model_dump(mode="json")
-    fields = {key: str(dumped[key]) for key in SCALAR_FIELD_NAMES}
-    fields["line_items.count"] = str(len(dumped["line_items"]))
-    for index, item in enumerate(dumped["line_items"]):
-        for key, value in item.items():
-            fields[f"line_items.{index}.{key}"] = str(value)
+def _flatten_fields(record: dict, definition: PipelineDefinition) -> dict[str, str]:
+    """One stored row per cell: scalars by name, table cells by path.
+
+    Which fields exist, and which of them are tables, comes from the
+    definition — the report order is the order the definition declares.
+    """
+    dumped = json_record(record)
+    fields = {name: str(dumped.get(name)) for name in definition.scalar_fields}
+    for table in definition.table_fields:
+        rows = dumped.get(table) or []
+        fields[f"{table}.count"] = str(len(rows))
+        for index, row in enumerate(rows):
+            for key, value in row.items():
+                fields[f"{table}.{index}.{key}"] = str(value)
     return fields
 
 
@@ -360,15 +391,21 @@ def _record_failure(document_id: uuid.UUID, error: str, final: bool) -> None:
         log.exception("could not record failure on document row")
 
 
-def _field_score(name: str, routing: RoutingDecision | None, confidence: ConfidenceReport):
+def _field_score(
+    name: str,
+    routing: RoutingDecision | None,
+    confidence: ConfidenceReport,
+    definition: PipelineDefinition,
+):
     """Calibrated probability when routing ran, else the uncalibrated prior.
 
-    Line-item cells inherit their parent's score, as they do in 2.1.
+    Table cells inherit their parent's score, as they do in 2.1.
     """
     if routing is None:
         return confidence.field_confidence(name)
     if name in routing.field_confidence:
         return routing.field_confidence[name]
-    if name.startswith("line_items"):
-        return routing.field_confidence.get("line_items")
+    table = name.split(".", 1)[0]
+    if table in definition.table_fields:
+        return routing.field_confidence.get(table)
     return None

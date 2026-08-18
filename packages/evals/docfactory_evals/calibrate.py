@@ -51,16 +51,15 @@ from docfactory_core.extraction import run_extraction
 from docfactory_core.llm import get_llm_client
 from docfactory_core.models import Document, DocumentStatus, Extraction
 from docfactory_core.parsing import extract_pdf_text
+from docfactory_core.pipeline import evaluate_rules, json_record
 from docfactory_core.pipeline_registry import default_pipeline
-from docfactory_core.schemas import Invoice
-from docfactory_core.validation import validate_invoice
 from sqlalchemy import delete, select
 
-from docfactory_evals.run import _compare, golden_split
+from docfactory_evals.run import compare, expected_fields, golden_split, ground_truth_path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PDF_DIR = REPO_ROOT / "data" / "synth" / "out"
-GROUND_TRUTH = PDF_DIR / "ground_truth.jsonl"
+GROUND_TRUTH = ground_truth_path(PDF_DIR, "invoice")
 LABELS_PATH = REPO_ROOT / "data" / "calibration" / "error_classes.jsonl"
 META_PATH = REPO_ROOT / "data" / "calibration" / "dataset_meta.json"
 CONFIG_VERSION = 2
@@ -70,9 +69,11 @@ DOCS_DIR = REPO_ROOT / "docs"
 # Namespace so a document's row id is stable across rebuilds.
 _CALIB_NS = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
 
-# Which fields exist comes from the pipeline definition, not from a
-# hardcoded invoice list.
-FIELDS = default_pipeline().scored_fields
+# The study calibrates one pipeline at a time; the invoice pipeline is the
+# one with a labelled corpus. Which fields exist comes from its definition,
+# not from a hardcoded list.
+DEFINITION = default_pipeline()
+FIELDS = DEFINITION.scored_fields
 
 # Feature names in fitted-weight order. Kept small and individually meaningful
 # so the saved config can be read and argued with, not just applied.
@@ -130,12 +131,16 @@ def build_dataset(limit: int | None = None) -> int:
         text = extract_pdf_text(pdf_path.read_bytes())
         if len(text) < settings.min_parse_chars:
             continue  # scanned: needs_ocr, out of scope for extraction calibration
-        outcome = run_extraction(text, client)
-        if outcome.invoice is None:
+        outcome = run_extraction(text, client, DEFINITION)
+        if outcome.record is None:
             continue
-        validation = validate_invoice(outcome.invoice)
+        validation = evaluate_rules(outcome.record, DEFINITION)
         report = score_extraction(
-            outcome.invoice, validation, attempts=outcome.attempts, source_text=text
+            outcome.record,
+            validation,
+            attempts=outcome.attempts,
+            source_text=text,
+            definition=DEFINITION,
         )
         plan = plan_corruption(
             text, rate=settings.mock_corruption_rate, seed=settings.mock_corruption_seed
@@ -156,7 +161,7 @@ def build_dataset(limit: int | None = None) -> int:
                     document_id=document_id,
                     tenant_id=settings.default_tenant_id,
                     model=f"{client.provider}:{client.model}",
-                    output=outcome.invoice.model_dump(mode="json"),
+                    output=json_record(outcome.record),
                     validation=validation,
                     validation_passed=all(validation.values()),
                     doc_confidence=report.doc_confidence,
@@ -224,9 +229,8 @@ def load_rows() -> list[Row]:
             record = records.get(doc_id)
             if record is None:
                 continue
-            invoice = Invoice.model_validate(extraction.output)
-            expected = {**record["fields"], "currency": record["currency"]}
-            correctness = _compare(invoice, expected)
+            extracted = DEFINITION.normalize(extraction.output)
+            correctness = compare(extracted, expected_fields(record, DEFINITION), DEFINITION)
             for field in FIELDS:
                 rows.append(
                     Row(
@@ -234,7 +238,7 @@ def load_rows() -> list[Row]:
                         layout=record["layout"],
                         field=field,
                         error_class=error_classes.get(doc_id, "unknown"),
-                        features=features_for(field, extraction.confidence_signals),
+                        features=features_for(field, extraction.confidence_signals, DEFINITION),
                         correct=int(correctness.get(field, True)),
                     )
                 )

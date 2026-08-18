@@ -29,6 +29,7 @@ from docfactory_core.models import (
     ReviewResolution,
     ReviewTask,
 )
+from docfactory_core.pipeline_registry import available_slugs
 from docfactory_core.queues import QueueBroker
 from docfactory_core.review import open_tasks, queue_depth, resolve_task
 from docfactory_core.storage import ObjectStore
@@ -156,9 +157,24 @@ def healthz() -> dict:
 
 
 @app.post("/documents", status_code=202, response_model=UploadResponse)
-def upload_document(file: UploadFile, response: Response) -> UploadResponse:
+def upload_document(
+    file: UploadFile, response: Response, doc_type: str = "invoice"
+) -> UploadResponse:
+    """Accept a PDF for a document type this deployment has a pipeline for.
+
+    `doc_type` selects the pipeline definition — its schema, its rules, its
+    SLA. It is caller-supplied, so an unknown type is rejected here, at the
+    boundary, rather than discovered by a worker holding a document it has no
+    definition for.
+    """
     settings = get_settings()
     tenant_id = current_tenant.get()
+
+    if doc_type not in available_slugs():
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown doc_type {doc_type!r}; available: {list(available_slugs())}",
+        )
 
     sha256, size = _hash_stream(file.file)
     if size == 0:
@@ -193,6 +209,7 @@ def upload_document(file: UploadFile, response: Response) -> UploadResponse:
             tenant_id=tenant_id,
             s3_key=s3_key,
             sha256=sha256,
+            doc_type=doc_type,
             status=DocumentStatus.RECEIVED,
         )
         try:

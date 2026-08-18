@@ -1,5 +1,13 @@
 {
   "document_type": "invoice",
+  "prompt": {
+    "intro": "Invoices may be in English or German (Rechnung); layouts vary and text extraction may interleave columns or split words.",
+    "field_notes": {
+      "tax_rate": "decimal fraction as a string (a printed \"19%\" becomes \"0.19\")",
+      "line_items": "one entry per row of the invoice's item table, in document order",
+      "vendor": "the issuing company's name; repair obvious text-extraction artifacts (split or spaced-out letters)"
+    }
+  },
   "fields": {
     "vendor": {
       "kind": "text"
@@ -30,7 +38,8 @@
       "kind": "money"
     },
     "total": {
-      "kind": "money"
+      "kind": "money",
+      "positive": true
     },
     "line_items": {
       "kind": "table",
@@ -92,6 +101,13 @@
       "tolerance": "0.02"
     },
     {
+      "name": "invoice_date_parses",
+      "type": "required",
+      "fields": [
+        "invoice_date"
+      ]
+    },
+    {
       "name": "due_date_not_before_invoice_date",
       "type": "date_order",
       "fields": [
@@ -132,40 +148,78 @@
     ],
     "properties": {
       "vendor": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1,
+        "description": "The issuing company's name as printed"
       },
       "invoice_number": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1,
+        "description": "Exactly as printed on the document"
       },
       "invoice_date": {
-        "type": "string"
+        "type": "string",
+        "format": "date",
+        "description": "ISO-8601 YYYY-MM-DD"
       },
       "due_date": {
-        "type": "string"
+        "type": "string",
+        "format": "date",
+        "description": "ISO-8601 YYYY-MM-DD"
       },
       "currency": {
         "type": "string",
         "enum": [
           "USD",
           "EUR"
-        ]
+        ],
+        "description": "ISO 4217 code"
       },
       "subtotal": {
-        "type": "string"
+        "type": "string",
+        "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
       },
       "tax_rate": {
-        "type": "string"
+        "type": "string",
+        "description": "Decimal fraction as a string: 19% -> \"0.19\", 6.25% -> \"0.0625\""
       },
       "tax": {
-        "type": "string"
+        "type": "string",
+        "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
       },
       "total": {
-        "type": "string"
+        "type": "string",
+        "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
       },
       "line_items": {
         "type": "array",
+        "description": "One entry per row of the invoice's item table, in document order",
         "items": {
-          "type": "object"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "description",
+            "quantity",
+            "unit_price",
+            "amount"
+          ],
+          "properties": {
+            "description": {
+              "type": "string"
+            },
+            "quantity": {
+              "type": "string",
+              "description": "e.g. \"3\""
+            },
+            "unit_price": {
+              "type": "string",
+              "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
+            },
+            "amount": {
+              "type": "string",
+              "description": "Plain decimal string: '.' as decimal separator, no thousands separators, no currency symbols. e.g. \"25832.09\""
+            }
+          }
         }
       }
     }

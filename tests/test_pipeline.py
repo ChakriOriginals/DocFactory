@@ -5,8 +5,9 @@ rejected on write with a clear error rather than failing inside a worker where
 the blast radius is a stuck document and an opaque traceback.
 
 The behaviour-preservation claim also lives here: the rule engine, driven by
-the seeded invoice config, must agree with the hardcoded validator it replaced
-on every input we can throw at it.
+the seeded invoice config, must reproduce what the hardcoded validator it
+replaced returned. That validator is gone (3c — one definition of the invoice
+schema, not two), so its answers are frozen below as literal expectations.
 """
 
 import json
@@ -21,8 +22,6 @@ from docfactory_core.pipeline import (
     residuals,
 )
 from docfactory_core.pipeline_registry import default_pipeline
-from docfactory_core.schemas import Invoice
-from docfactory_core.validation import validate_invoice
 
 RECORD = {
     "vendor": "Underwood Ltd",
@@ -73,28 +72,92 @@ class TestFieldKindsDriveSignals:
         assert str(record["total"]) == "1075.00"
 
 
-class TestRuleEngineMatchesTheHardcodedValidator:
-    """The regression guard for the whole refactor."""
+# Frozen output of the hardcoded `validate_invoice`, recorded before it was
+# deleted in 3c: same rule names, same booleans, same tolerances.
+FROZEN_RULE_RESULTS = {
+    "clean": (
+        {},
+        {
+            "line_items_sum_to_subtotal": True,
+            "subtotal_plus_tax_equals_total": True,
+            "tax_matches_rate": True,
+            "invoice_date_parses": True,
+            "due_date_not_before_invoice_date": True,
+        },
+    ),
+    "wrong_total": (
+        {"total": "9999.00"},
+        {
+            "line_items_sum_to_subtotal": True,
+            "subtotal_plus_tax_equals_total": False,
+            "tax_matches_rate": True,
+            "invoice_date_parses": True,
+            "due_date_not_before_invoice_date": True,
+        },
+    ),
+    "wrong_tax": (
+        {"tax": "500.00"},
+        {
+            "line_items_sum_to_subtotal": True,
+            "subtotal_plus_tax_equals_total": False,
+            "tax_matches_rate": False,
+            "invoice_date_parses": True,
+            "due_date_not_before_invoice_date": True,
+        },
+    ),
+    "wrong_subtotal": (
+        {"subtotal": "12.00"},
+        {
+            "line_items_sum_to_subtotal": False,
+            "subtotal_plus_tax_equals_total": False,
+            "tax_matches_rate": False,
+            "invoice_date_parses": True,
+            "due_date_not_before_invoice_date": True,
+        },
+    ),
+    "due_before_issue": (
+        {"due_date": "2025-01-01"},
+        {
+            "line_items_sum_to_subtotal": True,
+            "subtotal_plus_tax_equals_total": True,
+            "tax_matches_rate": True,
+            "invoice_date_parses": True,
+            "due_date_not_before_invoice_date": False,
+        },
+    ),
+    "wrong_rate": (
+        {"tax_rate": "0.5"},
+        {
+            "line_items_sum_to_subtotal": True,
+            "subtotal_plus_tax_equals_total": True,
+            "tax_matches_rate": False,
+            "invoice_date_parses": True,
+            "due_date_not_before_invoice_date": True,
+        },
+    ),
+}
 
-    @pytest.mark.parametrize(
-        "override",
-        [
-            {},
-            {"total": "9999.00"},
-            {"tax": "500.00"},
-            {"subtotal": "12.00"},
-            {"due_date": "2025-01-01"},
-            {"tax_rate": "0.5"},
-        ],
-    )
-    def test_shared_rules_agree(self, override):
-        record = RECORD | override
+
+class TestRuleEngineReproducesTheValidatorItReplaced:
+    """The regression guard for the whole refactor.
+
+    Expectations are the output of the hardcoded `validate_invoice` recorded
+    before it was deleted: same rule names, same booleans, same tolerances.
+    """
+
+    @pytest.mark.parametrize("case", sorted(FROZEN_RULE_RESULTS))
+    def test_frozen_rule_results(self, case):
+        override, expected = FROZEN_RULE_RESULTS[case]
         definition = default_pipeline()
-        old = validate_invoice(Invoice.model_validate(record))
-        new = evaluate_rules(definition.normalize(record), definition)
-        for rule, expected in old.items():
-            if rule in new:
-                assert new[rule] == expected, f"{rule} disagrees on {override}"
+        assert evaluate_rules(definition.normalize(RECORD | override), definition) == expected
+
+    def test_per_row_rules_stay_out_of_the_document_level_results(self):
+        # `row_arithmetic` is reported per row by inconsistent_rows, which
+        # localizes to a line; entering it here as well would double-count the
+        # same evidence in the confidence model's feature vector.
+        definition = default_pipeline()
+        assert any(rule.name == "row_arithmetic" for rule in definition.rules)
+        assert "row_arithmetic" not in evaluate_rules(definition.normalize(RECORD), definition)
 
     def test_residuals_are_reported_per_rule(self):
         definition = default_pipeline()
@@ -198,3 +261,28 @@ class TestSeededPipelineMatchesTheFile:
         assert definition.document_type == "invoice"
         assert set(definition.fields) == set(on_disk["fields"])
         assert definition.fields["line_items"].kind is FieldKind.TABLE
+
+    def test_the_definition_is_the_only_source_of_the_invoice_schema(self):
+        """3c: `INVOICE_JSON_SCHEMA` and `SCALAR_FIELD_NAMES` are gone."""
+        import importlib
+
+        for module in ("docfactory_core.schemas", "docfactory_core.validation"):
+            with pytest.raises(ModuleNotFoundError):
+                importlib.import_module(module)
+
+        definition = default_pipeline()
+        schema = definition.json_schema
+        assert set(schema["properties"]) == set(definition.fields)
+        assert set(schema["required"]) == set(definition.fields)
+
+
+class TestPromptConfigIsPartOfTheDefinition:
+    def test_field_notes_for_an_unknown_field_are_rejected(self):
+        config = minimal_config(prompt={"field_notes": {"ghost": "beware"}})
+        with pytest.raises(PipelineConfigError, match="unknown fields"):
+            parse_definition("t", "s", 1, config)
+
+    def test_a_positive_constraint_on_a_text_field_is_rejected(self):
+        config = minimal_config(fields={"name": {"kind": "text", "positive": True}})
+        with pytest.raises(PipelineConfigError, match="cannot be positive"):
+            parse_definition("t", "s", 1, config)

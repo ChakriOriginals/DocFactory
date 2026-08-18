@@ -76,9 +76,7 @@ def features_for(
         grounded = float(signals.get(f"groundedness.{field}_min", 1.0))
 
     shape = 0.0
-    if signals.get(f"{field}.looks_fragmented"):
-        shape = 1.0
-    if field == "total" and signals.get("nonpositive_total"):
+    if signals.get(f"{field}.looks_fragmented") or signals.get(f"{field}.nonpositive"):
         shape = 1.0
 
     rows_broken = 1.0 if signals.get(f"{field}.inconsistent_rows") else 0.0

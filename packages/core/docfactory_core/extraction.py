@@ -2,9 +2,14 @@
 
 One implementation shared by the worker's extract stage and the eval harness,
 so the eval measures exactly the code path production runs. Flow: LLM call
-(structured outputs) -> Pydantic validation (which canonicalizes via the R2
-normalizer) -> on failure, ONE retry with the validation error appended ->
-give up with the raw output preserved for debugging.
+(structured outputs against the *pipeline's* JSON Schema) -> validation of the
+returned object against that same schema -> kind-driven canonicalization via
+the R2 normalizer -> on failure, ONE retry with the validation error appended
+-> give up with the raw output preserved for debugging.
+
+Nothing here knows what an invoice is. The schema, the prompt and the
+canonical forms all come from the pipeline definition, so a second document
+type is a definition, not a code path.
 
 Spans use OpenInference attribute names so Phoenix renders LLM calls with
 prompt/response/token panels. Until setup_tracing() runs, spans are no-ops.
@@ -14,32 +19,53 @@ import json
 import time
 from dataclasses import dataclass
 
+import jsonschema
 from opentelemetry import trace
-from pydantic import ValidationError
 
 from docfactory_core.llm import LLMClient, LLMRefusalError
-from docfactory_core.schemas import INVOICE_JSON_SCHEMA, Invoice
+from docfactory_core.pipeline import FieldKind, PipelineDefinition
 
 tracer = trace.get_tracer("docfactory")
 
-SYSTEM_PROMPT = """\
-You extract structured data from invoice documents. Invoices may be in English or German \
-(Rechnung); layouts vary and text extraction may interleave columns or split words.
+# Canonical value rules per field kind. These are properties of the kind, not
+# of any document type, so they are stated once here rather than repeated in
+# every definition's prompt block.
+_KIND_RULES: dict[FieldKind, str] = {
+    FieldKind.DATE: "dates: ISO-8601 (YYYY-MM-DD), regardless of how they are printed",
+    FieldKind.MONEY: (
+        "monetary amounts: plain decimal strings with '.' as decimal separator, no "
+        'thousands separators, no currency symbols (e.g. "25832.09" for a printed '
+        '"25.832,09 €")'
+    ),
+    FieldKind.QUANTITY: 'quantities: plain decimal strings (e.g. "3")',
+    FieldKind.RATE: 'rates: decimal fractions as strings (a printed "19%" becomes "0.19")',
+}
 
-Return a single JSON object matching the provided schema. Canonical value rules:
-- dates: ISO-8601 (YYYY-MM-DD), regardless of how they are printed
-- monetary amounts: plain decimal strings with '.' as decimal separator, no thousands \
-separators, no currency symbols (e.g. "25832.09" for a printed "25.832,09 €")
-- tax_rate: decimal fraction as a string (a printed "19%" becomes "0.19")
-- currency: ISO 4217 code
-- line_items: one entry per row of the invoice's item table, in document order
-- vendor: the issuing company's name; repair obvious text-extraction artifacts \
-(split or spaced-out letters)"""
+
+def build_system_prompt(definition: PipelineDefinition) -> str:
+    """The extraction prompt for a document type, assembled from its definition."""
+    kinds = {spec.kind for spec in definition.fields.values()}
+    rules = [text for kind, text in _KIND_RULES.items() if kind in kinds]
+    for name, spec in definition.fields.items():
+        if spec.kind is FieldKind.ENUM and name not in definition.prompt_field_notes:
+            rules.append(f"{name}: one of {', '.join(spec.values)}")
+    rules.extend(f"{name}: {note}" for name, note in definition.prompt_field_notes.items())
+
+    head = f"You extract structured data from {definition.document_type} documents."
+    if definition.prompt_intro:
+        head = f"{head} {definition.prompt_intro}"
+    body = "\n".join(f"- {rule}" for rule in rules)
+    return (
+        f"{head}\n\nReturn a single JSON object matching the provided schema. "
+        f"Canonical value rules:\n{body}"
+    )
 
 
 @dataclass
 class ExtractionOutcome:
-    invoice: Invoice | None
+    # The extracted record, canonicalized per the definition's field kinds:
+    # Decimals for money, `date` for dates. None when extraction failed.
+    record: dict | None
     raw_output: str
     model: str  # "provider:model-id"
     attempts: int
@@ -49,13 +75,20 @@ class ExtractionOutcome:
     error: str | None = None
 
 
-def run_extraction(text: str, client: LLMClient) -> ExtractionOutcome:
-    messages: list[dict] = [
-        {
-            "role": "user",
-            "content": f"Extract the invoice fields from this document text:\n\n{text}",
-        }
-    ]
+def build_user_message(text: str, definition: PipelineDefinition) -> str:
+    """The extraction request for one document.
+
+    The "document text:" marker is load-bearing for the mock backend, which
+    recovers the raw document from it — see MockLLMClient._document_text.
+    """
+    return f"Extract the {definition.document_type} fields from this document text:\n\n{text}"
+
+
+def run_extraction(
+    text: str, client: LLMClient, definition: PipelineDefinition
+) -> ExtractionOutcome:
+    messages: list[dict] = [{"role": "user", "content": build_user_message(text, definition)}]
+    system = build_system_prompt(definition)
     model_label = f"{client.provider}:{client.model}"
     input_tokens = output_tokens = 0
     raw_output = ""
@@ -70,9 +103,13 @@ def run_extraction(text: str, client: LLMClient) -> ExtractionOutcome:
             span.set_attribute("llm.provider", client.provider)
             span.set_attribute("input.value", messages[-1]["content"])
             span.set_attribute("retry.attempt", attempt)
+            span.set_attribute("pipeline.slug", definition.slug)
             try:
                 response = client.complete(
-                    system=SYSTEM_PROMPT, messages=messages, output_schema=INVOICE_JSON_SCHEMA
+                    system=system,
+                    messages=messages,
+                    output_schema=definition.json_schema,
+                    definition=definition,
                 )
             except LLMRefusalError as exc:
                 error = str(exc)
@@ -88,9 +125,9 @@ def run_extraction(text: str, client: LLMClient) -> ExtractionOutcome:
                 span.set_attribute("llm.token_count.completion", response.output_tokens)
 
             try:
-                invoice = Invoice.model_validate(json.loads(_strip_fences(raw_output)))
+                record = validate_record(json.loads(_strip_fences(raw_output)), definition)
                 return ExtractionOutcome(
-                    invoice=invoice,
+                    record=record,
                     raw_output=raw_output,
                     model=model_label,
                     attempts=attempt,
@@ -98,8 +135,8 @@ def run_extraction(text: str, client: LLMClient) -> ExtractionOutcome:
                     output_tokens=output_tokens,
                     latency_ms=int((time.monotonic() - started) * 1000),
                 )
-            except (json.JSONDecodeError, ValidationError) as exc:
-                error = f"{type(exc).__name__}: {exc}"
+            except (jsonschema.ValidationError, ValueError) as exc:
+                error = _describe(exc)
                 span.set_attribute("error.validation", error)
                 messages.extend(
                     (
@@ -108,14 +145,14 @@ def run_extraction(text: str, client: LLMClient) -> ExtractionOutcome:
                             "role": "user",
                             "content": (
                                 "That JSON failed validation with these errors:\n"
-                                f"{exc}\n\nRespond with only the corrected JSON object."
+                                f"{error}\n\nRespond with only the corrected JSON object."
                             ),
                         },
                     )
                 )
 
     return ExtractionOutcome(
-        invoice=None,
+        record=None,
         raw_output=raw_output,
         model=model_label,
         attempts=2,
@@ -124,6 +161,24 @@ def run_extraction(text: str, client: LLMClient) -> ExtractionOutcome:
         latency_ms=int((time.monotonic() - started) * 1000),
         error=error,
     )
+
+
+def validate_record(payload: object, definition: PipelineDefinition) -> dict:
+    """Check the model's object against the pipeline schema, then canonicalize.
+
+    Two failure modes, both retryable and both reported to the model in its
+    own terms: the shape is wrong (JSON Schema), or a value cannot be read as
+    the kind its field declares ("31.02.2026" is not a date).
+    """
+    jsonschema.validate(payload, definition.json_schema)
+    return definition.normalize(payload)
+
+
+def _describe(exc: Exception) -> str:
+    if isinstance(exc, jsonschema.ValidationError):
+        path = "/".join(str(part) for part in exc.absolute_path) or "<root>"
+        return f"ValidationError: {path}: {exc.message}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _strip_fences(content: str) -> str:

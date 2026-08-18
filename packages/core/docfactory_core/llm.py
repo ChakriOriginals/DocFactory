@@ -17,6 +17,7 @@ from typing import Protocol
 
 from docfactory_core.config import Settings, get_settings
 from docfactory_core.corruption import apply_corruption, plan_corruption
+from docfactory_core.pipeline import PipelineDefinition
 
 
 class LLMRefusalError(RuntimeError):
@@ -37,7 +38,12 @@ class LLMClient(Protocol):
     model: str
 
     def complete(
-        self, *, system: str, messages: list[dict], output_schema: dict | None = None
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        output_schema: dict | None = None,
+        definition: "PipelineDefinition | None" = None,
     ) -> LLMResponse: ...
 
 
@@ -49,6 +55,10 @@ def get_llm_client(settings: Settings | None = None) -> "MockLLMClient | Anthrop
 
 
 class AnthropicLLMClient:
+    """The real backend. It receives the pipeline definition for interface
+    parity with the mock but needs nothing from it: the prompt and the output
+    schema, both built from that definition, are what the model sees."""
+
     provider = "anthropic"
 
     def __init__(self, settings: Settings) -> None:
@@ -61,7 +71,12 @@ class AnthropicLLMClient:
         self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key or None)
 
     def complete(
-        self, *, system: str, messages: list[dict], output_schema: dict | None = None
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        output_schema: dict | None = None,
+        definition: "PipelineDefinition | None" = None,
     ) -> LLMResponse:
         output_config: dict = {"effort": self._settings.llm_effort}
         if output_schema is not None:
@@ -116,7 +131,12 @@ class MockLLMClient:
         self._corruption_seed = settings.mock_corruption_seed
 
     def complete(
-        self, *, system: str, messages: list[dict], output_schema: dict | None = None
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        output_schema: dict | None = None,
+        definition: PipelineDefinition | None = None,
     ) -> LLMResponse:
         time.sleep(random.uniform(0.02, 0.08))
         text = self._document_text(messages)

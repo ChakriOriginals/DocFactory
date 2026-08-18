@@ -39,16 +39,15 @@ from docfactory_core.date_corroboration import (
     stated_payment_term,
 )
 from docfactory_core.groundedness import GROUNDEDNESS_THRESHOLD, groundedness
-from docfactory_core.pipeline import PipelineDefinition
-from docfactory_core.schemas import Invoice
+from docfactory_core.pipeline import FieldKind, PipelineDefinition
 
 # --- Uncalibrated penalty priors (see note 3 above) -------------------------
 
 PENALTY_ARITHMETIC_RULE = 0.30  # totals that don't add up: strong signal
 PENALTY_DATE_RULE = 0.15  # date ordering: weaker, often a real oddity
 PENALTY_RETRY = 0.10  # needed a second attempt to satisfy the schema
-PENALTY_VENDOR_FRAGMENTED = 0.10  # split-run text artifact in the vendor name
-PENALTY_NONPOSITIVE_TOTAL = 0.25
+PENALTY_TEXT_FRAGMENTED = 0.10  # split-run artifact in a free-text field
+PENALTY_NONPOSITIVE_AMOUNT = 0.25
 PENALTY_SUSPECT_FIELD_SHAPE = 0.20  # per-field: empty-ish / implausible value
 # Free-text fields have no arithmetic guard at all, so a value that cannot be
 # traced back to the source text is the only evidence available that it was
@@ -113,10 +112,10 @@ class ConfidenceReport:
     reasons: tuple[str, ...] = ()
 
     def field_confidence(self, name: str) -> float | None:
-        """Confidence for a stored field path, e.g. 'line_items.0.amount'.
+        """Confidence for a stored field path, e.g. '<table>.0.<column>'.
 
-        Line-item cells inherit their parent's score: the rules constrain the
-        item list as a whole, not individual cells within it.
+        Table cells inherit their parent's score: the rules constrain the row
+        list as a whole, not individual cells within it.
         """
         if name in self.fields:
             return self.fields[name].confidence
@@ -128,14 +127,19 @@ class ConfidenceReport:
 
 
 def score_extraction(
-    invoice: Invoice,
+    record: dict,
     validation: dict[str, bool],
     *,
     attempts: int = 1,
     source_text: str | None = None,
     definition: PipelineDefinition | None = None,
 ) -> ConfidenceReport:
-    """Score an extraction.
+    """Score an extracted record against its pipeline definition.
+
+    `record` is the canonicalized extraction — a plain dict keyed by field
+    name, with values already in the kind's canonical type (Decimal, date).
+    Nothing here reads an attribute off a document-type-specific model, so the
+    same code scores any pipeline.
 
     `source_text` is the parsed document text. When supplied, free-text fields
     are additionally checked for groundedness — without it the scorer is blind
@@ -172,16 +176,15 @@ def score_extraction(
     # --- residual magnitudes: how badly, not just whether ---
     from docfactory_core.pipeline import residuals as _residuals
 
-    record = invoice.model_dump() if hasattr(invoice, "model_dump") else dict(invoice)
     for rule_name, value in _residuals(record, definition).items():
         signals[f"residual.{rule_name}"] = value
     for table in definition.table_fields:
-        signals[f"{table}.count"] = len(getattr(invoice, table, None) or [])
+        signals[f"{table}.count"] = len(record.get(table) or [])
     # Scale for relative residuals: the largest money field present.
     money_values = [
-        abs(_as_float(getattr(invoice, name)))
+        abs(_as_float(record[name]))
         for name, spec in definition.fields.items()
-        if spec.kind.value == "money" and getattr(invoice, name, None) is not None
+        if spec.kind is FieldKind.MONEY and record.get(name) is not None
     ]
     signals["scale"] = max(money_values) if money_values else 1.0
 
@@ -194,26 +197,30 @@ def score_extraction(
     # Shape heuristics apply to every free-text field the pipeline declares,
     # not to a field named "vendor".
     for name in definition.text_fields:
-        value = str(getattr(invoice, name, "") or "")
+        value = str(record.get(name) or "")
         fragmented = looks_fragmented(value)
         signals[f"{name}.looks_fragmented"] = fragmented
         signals[f"{name}.token_count"] = len(value.split())
         if fragmented:
-            doc_penalty += PENALTY_VENDOR_FRAGMENTED
+            doc_penalty += PENALTY_TEXT_FRAGMENTED
             doc_reasons.append(f"{name}_looks_fragmented")
             field_penalties[name] += PENALTY_SUSPECT_FIELD_SHAPE
             field_reasons[name].append("looks_fragmented")
 
-    nonpositive_total = invoice.total <= 0
-    signals["nonpositive_total"] = nonpositive_total
-    if nonpositive_total:
-        doc_penalty += PENALTY_NONPOSITIVE_TOTAL
-        doc_reasons.append("nonpositive_total")
-        field_penalties["total"] += PENALTY_SUSPECT_FIELD_SHAPE
-        field_reasons["total"].append("nonpositive")
+    # Which amounts must be positive is declared per field: an invoice total
+    # qualifies, its tax does not.
+    for name in definition.positive_fields:
+        value = record.get(name)
+        nonpositive = value is None or _as_float(value) <= 0
+        signals[f"{name}.nonpositive"] = nonpositive
+        if nonpositive:
+            doc_penalty += PENALTY_NONPOSITIVE_AMOUNT
+            doc_reasons.append(f"nonpositive_{name}")
+            field_penalties[name] += PENALTY_SUSPECT_FIELD_SHAPE
+            field_reasons[name].append("nonpositive")
 
     for name in definition.text_fields:
-        if len(str(getattr(invoice, name, "") or "").strip()) < 2:
+        if len(str(record.get(name) or "").strip()) < 2:
             field_penalties[name] += PENALTY_SUSPECT_FIELD_SHAPE
             field_reasons[name].append("implausibly_short")
             signals[f"{name}.implausibly_short"] = True
@@ -230,7 +237,7 @@ def score_extraction(
     # --- groundedness: the only guard on unconstrained free text ---
     if source_text is not None:
         for name in definition.text_fields:
-            score = groundedness(getattr(invoice, name), source_text)
+            score = groundedness(record.get(name), source_text)
             signals[f"groundedness.{name}"] = score
             if score < GROUNDEDNESS_THRESHOLD:
                 doc_penalty += PENALTY_UNGROUNDED_FIELD
@@ -238,24 +245,32 @@ def score_extraction(
                 field_penalties[name] += PENALTY_UNGROUNDED_FIELD
                 field_reasons[name].append(f"ungrounded:{score}")
 
-        item_scores = [groundedness(item.description, source_text) for item in invoice.line_items]
-        weakest = min(item_scores, default=1.0)
-        signals["groundedness.line_items_min"] = weakest
-        signals["groundedness.line_items_mean"] = (
-            round(sum(item_scores) / len(item_scores), 4) if item_scores else 1.0
-        )
-        if weakest < GROUNDEDNESS_THRESHOLD:
-            doc_penalty += PENALTY_UNGROUNDED_FIELD
-            doc_reasons.append("ungrounded:line_item_description")
-            field_penalties["line_items"] += PENALTY_UNGROUNDED_FIELD
-            field_reasons["line_items"].append(f"ungrounded_description:{weakest}")
+        # Free-text columns of a table are checked the same way, row by row;
+        # which columns those are comes from the declared item kinds.
+        for table in definition.table_fields:
+            columns = _text_columns(definition, table)
+            row_scores = [
+                groundedness(row.get(column), source_text)
+                for row in (record.get(table) or [])
+                for column in columns
+            ]
+            weakest = min(row_scores, default=1.0)
+            signals[f"groundedness.{table}_min"] = weakest
+            signals[f"groundedness.{table}_mean"] = (
+                round(sum(row_scores) / len(row_scores), 4) if row_scores else 1.0
+            )
+            if weakest < GROUNDEDNESS_THRESHOLD:
+                doc_penalty += PENALTY_UNGROUNDED_FIELD
+                doc_reasons.append(f"ungrounded:{table}_text")
+                field_penalties[table] += PENALTY_UNGROUNDED_FIELD
+                field_reasons[table].append(f"ungrounded_row_text:{weakest}")
 
     # --- date corroboration: the only guard on dates against the page ---
     if source_text is not None:
         text_dates = dates_in_text(source_text)
         signals["date_corroboration.text_dates_found"] = len(text_dates)
         for name in definition.date_fields:
-            score = corroborate_date(getattr(invoice, name), text_dates)
+            score = corroborate_date(record.get(name), text_dates)
             signals[f"date_corroboration.{name}"] = score
             if score < DATE_CORROBORATION_THRESHOLD:
                 doc_penalty += PENALTY_UNCORROBORATED_DATE
@@ -263,16 +278,29 @@ def score_extraction(
                 field_penalties[name] += PENALTY_UNCORROBORATED_DATE
                 field_reasons[name].append(f"not_on_page:{score}")
 
+        # A stated term ("Net 30") pins the interval between two dates. Which
+        # two is not knowledge this module holds: the date_order rules already
+        # declare the pairs the document type cares about.
         term = stated_payment_term(source_text)
-        term_score = corroborate_payment_term(invoice.invoice_date, invoice.due_date, term)
+        term_score: float | None = None
+        for rule in definition.rules:
+            if rule.type != "date_order":
+                continue
+            score = corroborate_payment_term(
+                record.get(rule.params["earlier"]), record.get(rule.params["later"]), term
+            )
+            if score is None:
+                continue
+            term_score = score if term_score is None else min(term_score, score)
+            if score < DATE_CORROBORATION_THRESHOLD:
+                doc_penalty += PENALTY_UNCORROBORATED_DATE
+                doc_reasons.append("payment_term_mismatch")
+                # The stated term pins the interval but not which end moved.
+                for name in rule.fields:
+                    if name in definition.date_fields:
+                        field_penalties[name] += PENALTY_UNCORROBORATED_DATE / 2
+                        field_reasons[name].append(f"term_mismatch:{score}")
         signals["date_corroboration.payment_term"] = term_score
-        if term_score is not None and term_score < DATE_CORROBORATION_THRESHOLD:
-            doc_penalty += PENALTY_UNCORROBORATED_DATE
-            doc_reasons.append("payment_term_mismatch")
-            # The stated term pins the interval but not which end moved.
-            for name in definition.date_fields:
-                field_penalties[name] += PENALTY_UNCORROBORATED_DATE / 2
-                field_reasons[name].append(f"term_mismatch:{term_score}")
 
     fields = {
         name: FieldConfidence(name, _clamp(1.0 - penalty), tuple(field_reasons[name]))
@@ -284,6 +312,11 @@ def score_extraction(
         signals=signals,
         reasons=tuple(doc_reasons),
     )
+
+
+def _text_columns(definition: PipelineDefinition, table: str) -> tuple[str, ...]:
+    spec = definition.fields[table]
+    return tuple(name for name, column in spec.item_fields.items() if column.is_free_text)
 
 
 def failed_extraction_report(error: str | None) -> ConfidenceReport:
