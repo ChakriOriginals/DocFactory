@@ -1,198 +1,137 @@
-# DocFactory on AWS — runbook
+# DocFactory on AWS — the Terraform
 
-Terraform for the Phase 4c stack: the API behind an ALB, a worker fleet that
-autoscales on queue depth, S3 → SQS batch ingestion, and an OIDC role for CI.
+Two independently applyable root modules. **This file explains the shape and
+the reasoning; the procedure lives in
+[`docs/deploy_runbook.md`](../../docs/deploy_runbook.md).**
 
-**Status: written and validated, never applied.** No AWS account was reachable
-from the machine this was built on, so every number below about cost is a rate
-card figure and every "should" is a design intent, not an observation. The
-first `apply` is the test.
+```
+infra/terraform/
+  data-plane/      S3 + notifications, SQS + DLQs, Secrets Manager, ECR, IAM
+  compute-plane/   VPC, ALB, ECS Fargate (api/worker/migrate), autoscaling
+```
+
+**Status: applied for real against LocalStack, never against AWS.** The data
+plane stands up and tears down cleanly in an emulator
+([`infra/localstack/`](../localstack/README.md)); the compute plane is
+`validate`/`plan` only, because LocalStack Community emulates none of Fargate,
+ALB or application autoscaling. Every cost figure below is a rate-card number.
 
 ---
 
-## Cost safety — read before the first apply
+## Why two layers
 
-This stack is designed to be destroyed. Bring it up for a demo, tear it down
-after, and it costs a few dollars a month rather than a few dozen.
+**The dependency runs one way: compute → data.** The compute layer reads the
+data layer's declared outputs through `terraform_remote_state`
+(`compute-plane/data_plane.tf`); nothing in the data layer knows the compute
+layer exists.
 
-**What costs money while it exists**
+That direction buys three things:
 
-| Resource | Rough idle cost | Notes |
-|---|---|---|
-| ALB | ~$16/mo | The price of a stable URL. Unavoidable if you want one. |
-| Fargate tasks | per second | API: 1 task always. Workers: **0 when idle**. |
-| NAT gateway | ~$32/mo | **This stack creates none — see below.** |
-| S3, SQS, Secrets, ECR, logs | cents | Retention is capped; untagged layers expire. |
+1. **An overnight park.** `terraform destroy` in `compute-plane/` removes the
+   ALB — the stack's entire idle cost — and every Fargate task, and leaves the
+   bucket, the queues *and their contents*, the secrets and the pushed images
+   untouched. Bring it back in the morning and the pipeline resumes against the
+   same data. Destroying compute is a complete, safe operation precisely
+   because nothing depends on it.
+2. **A cheap first apply.** The layer that can go wrong expensively is applied
+   second, after the cheap one is proven.
+3. **A blast radius you can state.** The data layer holds everything with a
+   lifetime longer than a deploy. The compute layer holds everything that is
+   disposable by design.
 
-**The NAT decision.** Fargate tasks run in *public* subnets with public IPs and
-are kept private by security groups: nothing may reach a task except the ALB,
-on one port, and the worker accepts no inbound traffic at all. The conventional
-alternative — private subnets plus a NAT gateway — is ~$32/month before any
-traffic; the other alternative, private subnets plus interface VPC endpoints
-for ECR/SQS/Secrets Manager/Logs, is ~$7/month per endpoint per AZ and costs
-*more* than the NAT it replaces. For a stack cycled up and down by one person,
-public subnets with tight security groups is the honest trade. The S3 *gateway*
+Order is: apply data, apply compute; destroy compute, destroy data. Destroying
+the data layer while compute is up is not a supported operation, and Terraform
+will not warn you — the reference does not exist in that direction.
+
+**The contract is enforced in CI.** `terraform validate` cannot check it: it
+type-checks one directory at a time, and the compute layer's view of the data
+layer is only concrete once the other layer has been applied. So a reference to
+a non-existent output is a clean `validate` and a failed `plan` — found at
+deploy time, against a real account. `tests/test_terraform_layers.py` closes
+that by asserting every `local.data_plane.*` reference names a declared output,
+that the compute layer never declares its own copy of a data-layer resource
+type, and that the dependency does not run backwards.
+
+Both layers also share a `check "layers_agree"` block: if `name_prefix` or
+`environment` disagree between them, the plan fails rather than building an ALB
+in front of another stack's services.
+
+---
+
+## The decisions worth defending
+
+**No NAT gateway.** ~$32/month before a byte moves, and the single most common
+way a small AWS project quietly costs real money. Fargate tasks run in *public*
+subnets with public IPs and are kept private by security groups instead:
+nothing may reach a task except the ALB, on one port, and the worker accepts no
+inbound traffic at all. The conventional alternative — private subnets plus
+interface VPC endpoints for ECR/SQS/Secrets Manager/Logs — is ~$7/month per
+endpoint per AZ and costs *more* than the NAT it replaces. The S3 *gateway*
 endpoint is free and is included, so bucket traffic stays inside the VPC.
 
-**What survives a destroy, on purpose.** The documents bucket. `destroy` fails
-loudly if it still holds objects unless `force_destroy_documents = true`.
-Compute is disposable; customer documents are not, and that difference is
-enforced by the tooling rather than by remembering. Neon is outside Terraform
-entirely, so the database survives too.
+**Neon, not RDS.** RDS is ~$15/month minimum for a `db.t4g.micro` idle 95% of
+the time. Neon scales to zero and is ordinary Postgres, so RLS, `FORCE ROW
+LEVEL SECURITY` and the non-superuser `docfactory_app` role behave exactly as
+they do against the compose Postgres. The only thing RDS would buy is being
+inside the VPC, and this stack has no VPC-private data plane to speak of.
+
+**Step scaling, not target tracking.** Target tracking cannot scale a service to
+zero on a raw queue metric — "messages per task" is undefined at zero tasks, so
+the fleet parks at one task forever, a permanent ~$9/month on an idle stack.
+Step scaling on `ApproximateNumberOfMessagesVisible` fires whether or not
+anything is running, so 0 → 1 works. Scale-in is a *composite* alarm requiring
+an empty queue **and** nothing in flight for five minutes, because a queue can
+read empty while a worker is mid-document and killing that worker would
+redeliver the message and waste a model call already paid for.
+
+**The documents bucket is outside the destroy blast radius.** `destroy` fails
+loudly on a non-empty bucket unless `force_destroy_documents = true`. Compute is
+disposable; customer documents are not, and the difference is enforced by the
+tooling rather than by remembering. (Verified both ways against LocalStack.
+Note that `force_destroy` is read from *state*, so flipping the variable and
+running `destroy` still refuses — you must `apply` first.)
+
+**Secrets are never task-definition environment variables.** Those are visible
+to anyone who can call `DescribeTaskDefinition`. The task pulls them at runtime
+from Secrets Manager, and the *execution* role's permission to read them is
+scoped to exactly three ARNs. `recovery_window_in_days = 0` so a destroyed
+secret does not keep its name reserved and break the next apply.
+
+**No long-lived AWS keys in GitHub.** The CI role is assumed with a short-lived
+OIDC token, scoped by a `token.actions.githubusercontent.com:sub` condition to
+one repository — without that condition any GitHub repository in the world
+could assume it. `iam:PassRole` is scoped to this stack's three roles with a
+`PassedToService` condition; without it, the deploy role could pass any role in
+the account to a task it starts.
+
+**Least privilege, checked against the code.** Every grant in
+`data-plane/iam.tf` has a call site, with one flagged exception
+(`s3:GetBucketLocation`). The mapping is the pre-flight table in the runbook; it
+found two real gaps in 4c.5c that would each have broken the first deploy.
 
 ---
 
-## First apply
+## Local validation
 
 ```bash
-cd infra/terraform
-cp terraform.tfvars.example terraform.tfvars   # then edit
-
-export TF_VAR_neon_database_url_owner='postgresql+psycopg://owner:...@...neon.tech/docfactory'
-export TF_VAR_neon_database_url_app='postgresql+psycopg://docfactory_app:...@...neon.tech/docfactory'
-
-terraform init
-terraform plan      # read it — this is the first time it has ever run
-terraform apply
+make localstack-cycle
 ```
 
-`terraform output api_url` is the live URL.
-
-### Before that: Neon
-
-Neon rather than RDS is deliberate. RDS is ~$15/month minimum for a `db.t4g.micro`
-that is idle 95% of the time; Neon scales to zero and costs nothing between
-demos, and the Phase 3a isolation model works there unchanged — it is ordinary
-Postgres, so RLS, `FORCE ROW LEVEL SECURITY`, and the non-superuser
-`docfactory_app` role all behave exactly as they do against the compose
-Postgres. The only thing RDS would buy here is being inside the VPC, and this
-stack has no VPC-private data plane to speak of.
-
-Create the project, then create the app role the way the migration does
-locally — as the owner:
-
-```sql
-CREATE ROLE docfactory_app LOGIN PASSWORD '...' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
-```
-
-`alembic upgrade head` (run by the migrate task, as the owner) creates the rest.
-
-### First images
-
-The services reference `:latest` until CI pushes a real tag, so the first apply
-needs an image to exist:
-
-```bash
-aws ecr get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin "$(terraform output -raw ecr_repositories | jq -r .api | cut -d/ -f1)"
-
-docker build -f ../docker/Dockerfile.api    -t "$(terraform output -json ecr_repositories | jq -r .api):latest" ../..
-docker build -f ../docker/Dockerfile.worker -t "$(terraform output -json ecr_repositories | jq -r .worker):latest" ../..
-docker push "$(terraform output -json ecr_repositories | jq -r .api):latest"
-docker push "$(terraform output -json ecr_repositories | jq -r .worker):latest"
-```
-
-### Migrations
-
-Never from a laptop against production, and never by the app tasks — they
-connect as `docfactory_app`, which holds no DDL rights by design. Run the
-one-off task, which uses the owner secret:
-
-```bash
-aws ecs run-task --cluster docfactory-dev --task-definition docfactory-dev-migrate \
-  --launch-type FARGATE --network-configuration \
-  "awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=ENABLED}"
-```
-
-CI does this automatically before rolling the services, and fails the deploy if
-the migration exits non-zero.
+Applies the data plane for real against LocalStack, runs 47 checks against the
+emulator, destroys, confirms empty. See
+[`infra/localstack/README.md`](../localstack/README.md) for exactly what that
+proves — and, importantly, what it does not: **LocalStack Community does not
+enforce IAM**, so a green run is evidence about wiring and none at all about
+permissions.
 
 ---
 
-## Teardown — the part to get right
+## Quick reference
 
-```bash
-terraform destroy
-../../scripts/aws_orphan_check.sh us-east-1
-```
-
-`terraform destroy` reporting success means it deleted what it knew about. That
-is not the same as "nothing is billing". **Always run the orphan check**, which
-looks for anything tagged `project=docfactory` plus the categories that bite:
-
-- **NAT gateways** — this stack creates none; any that appear are from
-  something else and cost the most of anything on this list.
-- **ALBs** — deletion protection is off, but a half-failed destroy can leave one.
-- **Unattached Elastic IPs** — ~$3.60/month each for doing nothing.
-- **Running ECS tasks** — a service left at `desired_count > 0` keeps launching them.
-- **Log groups** — no retention means storage forever.
-- **Secrets pending deletion** — these keep the *name* reserved and break the
-  next apply. This stack sets `recovery_window_in_days = 0` so they go at once.
-
-The check prints `CLEAN` or names what survived. The documents bucket is
-reported as *kept*, not as an orphan — that is the design.
-
-### If destroy fails
-
-- *"BucketNotEmpty"* — intended. Copy what you need out, then either empty the
-  bucket or set `force_destroy_documents = true` and destroy again.
-- *"secret scheduled for deletion"* on the next apply — a previous destroy used
-  a recovery window; `aws secretsmanager delete-secret --force-delete-without-recovery`.
-- *ECS service stuck draining* — a task failing its health check on a loop.
-  Set `desired_count` to 0, wait, destroy again.
-
----
-
-## Autoscaling
-
-The worker fleet scales on the extract queue's `ApproximateNumberOfMessagesVisible`:
-
-- **Backlog alarm** (≥1 message, 1 minute) → step scaling to 1, 3, or the
-  maximum, by backlog size.
-- **Idle composite alarm** (nothing visible **and** nothing in flight, 5 minutes)
-  → back to `worker_min_count`, which defaults to **0**.
-
-Step scaling rather than target tracking, deliberately: target tracking on a
-per-task metric cannot scale from zero — "messages per task" is undefined with
-no tasks — so the fleet would park at one task forever, which is a permanent
-Fargate charge on an idle stack. The composite idle alarm is what makes
-scale-to-zero safe: a queue can read empty while a worker is mid-document, and
-killing that worker would redeliver the message and waste a model call already
-paid for.
-
-The 4b backpressure work is unchanged by scaling: the per-tenant in-flight
-ceiling is enforced against the database, not per process, so ten workers share
-one ceiling and one tenant's flood still cannot starve another.
-
-## Verifying the invariants in the cloud
-
-After the first apply, these are the checks that prove deployment did not
-quietly relax anything (each one has a local test that must also pass here):
-
-| Invariant | How to check on the deployed stack |
-|---|---|
-| RLS isolation | Upload as tenant A, `GET /documents/{id}` with tenant B's key → **404**, not 403 |
-| Non-superuser app role | `SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname='docfactory_app'` → `f, f` |
-| No DDL from app tasks | `CREATE TABLE x(...)` as `docfactory_app` → permission denied |
-| Idempotency | Upload the same PDF twice → 202 then 200, `duplicate: true`, one row |
-| Batch path | `aws s3 cp inv.pdf s3://$BUCKET/dev-tenant/dropbox/invoice/` → document appears |
-| Both paths converge | Same bytes by upload and by drop → one document |
-| DLQ after 3 | Drop a corrupt PDF → 3 receives → message in `*-parse-dlq`, document `failed` |
-| needs_ocr | Drop a scanned PDF → terminal `needs_ocr`, **not** the DLQ |
-| Budget cap | Set `budget_usd` below one call → documents stop at `budget_exceeded` |
-| Metering | `GET /usage` → non-zero `cost_usd`, tier split, queue depths |
-
-## A real-model run
-
-Mock is the deployed default and the stack should sit there. For one honest
-cloud latency/cost number:
-
-```bash
-aws secretsmanager put-secret-value --secret-id docfactory-dev/anthropic-api-key \
-  --secret-string "$REAL_KEY"
-terraform apply -var model_provider=anthropic     # rolls the task definitions
-# ... run a handful of documents, read GET /usage ...
-terraform apply -var model_provider=mock          # and back
-```
-
-Leaving a deployed stack on `anthropic` is how a demo becomes a bill.
+| | data-plane | compute-plane |
+|---|---|---|
+| Holds | bucket, queues, secrets, registries, IAM | VPC, ALB, ECS, autoscaling, log groups |
+| Idle cost | cents | ~$16/mo ALB + Fargate time |
+| Safe to destroy alone | no (compute depends on it) | **yes — this is the overnight park** |
+| Applied against LocalStack | yes, 28/33 resources | no (not emulated) |
+| Survives its own destroy | the documents bucket, by design | nothing |
