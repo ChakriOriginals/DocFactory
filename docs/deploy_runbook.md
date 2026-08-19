@@ -282,7 +282,7 @@ psql "$NEON_OWNER_URL" -c \
 Then mint an API key. Do this **as the owner**:
 
 ```bash
-DATABASE_URL="$NEON_OWNER_URL" uv run python -c "
+DATABASE_ADMIN_URL="$NEON_OWNER_URL" uv run python -c "
 from docfactory_core.auth import issue_api_key
 print(issue_api_key('dev-tenant', 'runbook').plaintext)"
 ```
@@ -290,11 +290,13 @@ print(issue_api_key('dev-tenant', 'runbook').plaintext)"
 Save it: `export DK=dk_...`. The plaintext is shown once and stored only as a
 SHA-256 hash.
 
-> **Known open issue.** The `docfactory_app` role currently retains
-> INSERT/UPDATE/DELETE on `api_keys`, and that table carries no RLS policy —
-> so a compromised task could mint a key for another tenant. The RLS migration's
-> own comment says this is already prevented; it is not. It does not block this
-> deploy, and it is tracked separately. Mint keys as the owner regardless.
+> **Why `DATABASE_ADMIN_URL` and not `DATABASE_URL`.** Key issuance is an owner
+> operation: `issue_api_key` connects on the owner URL, and the app role holds
+> `SELECT` on `api_keys` and nothing else, so it can authenticate but cannot
+> mint. That was the intent from Phase 3a and was only made true in 4d — see
+> [tenant_isolation_audit.md](tenant_isolation_audit.md). A deployed task has
+> no `DATABASE_ADMIN_URL` (only the one-off migrate task holds the owner
+> secret), so this command runs from your machine, not from the stack.
 
 **Rollback**: `alembic downgrade` via the same one-off task, or drop and
 recreate the Neon branch — it is a demo database.
@@ -357,6 +359,8 @@ that lied.
 | 1 | **Cross-tenant read is a 404, not a 403** | `curl -s -o /dev/null -w '%{http_code}' "$API_URL/documents/$DOC" -H "x-api-key: $OTHER_DK"` | `404` — a 403 would confirm the id exists |
 | 2 | **App role is not a superuser** | `psql "$NEON_OWNER_URL" -c "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname='docfactory_app'"` | `f \| f` |
 | 3 | **App role holds no DDL** | `psql "$NEON_APP_URL" -c 'CREATE TABLE x (i int)'` | `ERROR: permission denied for schema public` |
+| 3b | **App role cannot mint credentials** | `psql "$NEON_APP_URL" -c "INSERT INTO api_keys (tenant_id,name,key_hash,key_prefix) VALUES ('dev-tenant','forged',repeat('f',64),'dk_x')"` | `ERROR: permission denied for table api_keys` |
+| 3c | **Every tenant table is policy-protected** | `psql "$NEON_OWNER_URL" -f scripts/isolation_check.sql` | no rows — every table with a `tenant_id` has forced RLS and a policy |
 | 4 | **Dedupe, API path** | re-POST the same PDF from 6a | HTTP `200`, `duplicate: true`, same `document_id` |
 | 5 | **Dedupe across both paths** | `aws s3 cp <the 6a file> s3://$BUCKET/dev-tenant/dropbox/invoice/` then count rows for that sha | exactly **one** row |
 | 6 | **DLQ after 3 receives** | `printf 'not a pdf' > /tmp/corrupt.pdf; aws s3 cp /tmp/corrupt.pdf s3://$BUCKET/dev-tenant/dropbox/invoice/corrupt.pdf` — then poll the parse DLQ | message in `docfactory-dev-parse-dlq`, document `failed` |
@@ -371,7 +375,7 @@ For #1 and #5 you need a second tenant:
 psql "$NEON_OWNER_URL" -c \
   "INSERT INTO tenants (id, name, status, review_sla_hours, budget_usd)
    VALUES ('acme-tenant','Acme','active',24,100) ON CONFLICT DO NOTHING"
-DATABASE_URL="$NEON_OWNER_URL" uv run python -c "
+DATABASE_ADMIN_URL="$NEON_OWNER_URL" uv run python -c "
 from docfactory_core.auth import issue_api_key
 print(issue_api_key('acme-tenant','runbook').plaintext)"
 ```

@@ -560,6 +560,127 @@ class TestLateAddedTablesAreProtected:
             assert result.rowcount == 0
 
 
+class TestControlPlaneTables:
+    """`tenants` and `api_keys` cannot have policies, so grants are the control.
+
+    Both are read by the auth path before any tenant is bound, so a
+    tenant-scoped policy would compare against an unset app.tenant_id and every
+    login would fail. The protection is therefore GRANT-shaped, and these tests
+    are the only thing asserting it.
+
+    Until 4d the app role could INSERT into api_keys. That is isolation
+    defeated from above rather than around: mint a key for another tenant,
+    present it, and every policy in the schema then works perfectly on the
+    attacker's behalf.
+    """
+
+    @staticmethod
+    def _as_app(statement: str, **params):
+        from sqlalchemy.exc import ProgrammingError
+
+        with (
+            pytest.raises(ProgrammingError, match="permission denied"),
+            tenant_context("dev-tenant"),
+            session_scope() as session,
+        ):
+            session.execute(text(statement), params)
+            session.flush()
+
+    def test_the_app_role_cannot_mint_an_api_key(self, other_tenant):
+        """The privilege escalation itself. This exact INSERT used to succeed."""
+        self._as_app(
+            "INSERT INTO api_keys (tenant_id, name, key_hash, key_prefix) "
+            "VALUES (:t, 'forged', repeat('f', 64), 'dk_forged')",
+            t=OTHER,
+        )
+
+    def test_the_app_role_cannot_mint_a_key_for_itself_either(self):
+        """Not a cross-tenant problem — the app has no business issuing keys."""
+        self._as_app(
+            "INSERT INTO api_keys (tenant_id, name, key_hash, key_prefix) "
+            "VALUES ('dev-tenant', 'forged', repeat('e', 64), 'dk_forged2')"
+        )
+
+    def test_the_app_role_cannot_revoke_a_key(self):
+        """Revocation is denial of service if anyone can do it."""
+        self._as_app("UPDATE api_keys SET revoked_at = now()")
+
+    def test_the_app_role_cannot_delete_a_key(self):
+        self._as_app("DELETE FROM api_keys")
+
+    def test_the_app_role_cannot_write_tenants(self):
+        self._as_app("UPDATE tenants SET budget_usd = 1000000")
+
+    def test_the_app_role_cannot_rewrite_migration_state(self):
+        """An app role that can UPDATE alembic_version can convince the next
+        deploy that a migration it never ran has already been applied."""
+        self._as_app("UPDATE alembic_version SET version_num = 'deadbeef'")
+
+    def test_the_app_role_can_still_read_api_keys(self):
+        """The revoke must not overshoot. Authentication is a SELECT on this
+        table with no tenant bound, and it has to keep working."""
+        with tenant_context("dev-tenant"), session_scope() as session:
+            assert session.execute(text("SELECT count(*) FROM api_keys")).scalar() >= 1
+
+    def test_authentication_still_resolves_a_tenant(self, other_tenant):
+        """THE regression this fix could plausibly have caused. Login works."""
+        assert resolve_tenant("dev-local-key") == "dev-tenant"
+        assert resolve_tenant(other_tenant["api_key"]) == OTHER
+
+    def test_authentication_works_with_no_tenant_bound(self, other_tenant):
+        """Explicitly the unbound case, since that is what auth actually is:
+        resolving the key is how the tenant becomes known in the first place."""
+        from docfactory_core.db import current_tenant
+
+        token = current_tenant.set(None)
+        try:
+            assert resolve_tenant(other_tenant["api_key"]) == OTHER
+        finally:
+            current_tenant.reset(token)
+
+    def test_issuing_a_key_still_works_through_the_owner(self):
+        """Key issuance moved to admin_session_scope(). It must still function,
+        and the key it mints must authenticate."""
+        issued = issue_api_key("dev-tenant", "4d owner-path test")
+        try:
+            assert resolve_tenant(issued.plaintext) == "dev-tenant"
+        finally:
+            revoke_api_key(issued.key_id)
+        with pytest.raises(AuthError):
+            resolve_tenant(issued.plaintext)
+
+    def test_api_keys_grants_are_exactly_select(self):
+        """The property, asserted directly rather than inferred from behaviour."""
+        with admin_session_scope() as session:
+            granted = set(
+                session.execute(
+                    text(
+                        "SELECT privilege_type FROM information_schema.role_table_grants "
+                        "WHERE table_schema='public' AND table_name='api_keys' "
+                        "AND grantee='docfactory_app'"
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert granted == {"SELECT"}, f"api_keys grants drifted: {sorted(granted)}"
+
+    def test_alembic_version_has_no_app_grants_at_all(self):
+        with admin_session_scope() as session:
+            granted = (
+                session.execute(
+                    text(
+                        "SELECT privilege_type FROM information_schema.role_table_grants "
+                        "WHERE table_schema='public' AND table_name='alembic_version' "
+                        "AND grantee='docfactory_app'"
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert granted == [], f"app role can still touch migration state: {granted}"
+
+
 class TestSessionScoping:
     def test_tenant_setting_is_transaction_local(self):
         """SET LOCAL, not SET: the value must not survive the transaction.

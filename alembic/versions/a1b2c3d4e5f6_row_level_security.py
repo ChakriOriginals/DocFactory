@@ -101,8 +101,19 @@ def upgrade() -> None:
         )
 
     # Tenants and api_keys are not tenant-scoped rows in the same sense: the
-    # auth path must read them *before* a tenant context exists. They are
-    # readable by the app role but writable only by the owner.
+    # auth path must read them *before* a tenant context exists, so neither can
+    # carry a tenant-scoped policy — a policy would compare against an unset
+    # app.tenant_id and every login would fail. They are protected by grant
+    # instead.
+    #
+    # CORRECTION (4d): this REVOKE covers `tenants` and nothing else. The
+    # original comment here claimed it covered api_keys too, which it never
+    # did — the app role kept INSERT/UPDATE/DELETE on api_keys and could
+    # therefore mint a valid key for any tenant. Fixed in revision
+    # e5b2c1d8a3f7; see docs/tenant_isolation_audit.md. Left as a comment
+    # rather than a change to this migration's SQL, because rewriting applied
+    # history would leave every existing database in a state no migration
+    # describes.
     op.execute(sa.text(f"REVOKE INSERT, UPDATE, DELETE ON tenants FROM {APP_ROLE}"))
 
 

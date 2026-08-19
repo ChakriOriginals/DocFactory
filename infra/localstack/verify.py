@@ -458,6 +458,102 @@ def check_app_assert_path(rep: Report, endpoint: str, out: dict) -> None:
     )
 
 
+def check_database_grants(rep: Report) -> None:
+    """The control-plane grants, asserted as properties rather than behaviour.
+
+    Not an AWS check, and deliberately here anyway. This file already crosses
+    out of "what did Terraform build" and into "does the application agree"
+    when it runs the INFRA_MODE=assert bootstrap; the database's control-plane
+    grants belong to the same question, and they are the kind of property that
+    a hand-run psql check verifies once and then nobody looks at again.
+
+    The authoritative, always-run version of these is
+    tests/test_isolation.py::TestControlPlaneTables, which runs in CI on every
+    push. This is the deploy-time echo — the schema a real stack is pointed at
+    is Neon, not the compose Postgres, and the two can drift.
+
+    Reported as not-representable when no database is reachable, because a
+    check that cannot run must never look like a check that passed. (The same
+    lesson as the orphan script in 4c.5b.)
+    """
+    try:
+        from docfactory_core.db import admin_session_scope
+        from sqlalchemy import text
+
+        with admin_session_scope() as session:
+            grants = {
+                (row[0], row[1])
+                for row in session.execute(
+                    text(
+                        """
+                        SELECT table_name, privilege_type
+                        FROM information_schema.role_table_grants
+                        WHERE table_schema = 'public' AND grantee = 'docfactory_app'
+                          AND table_name IN ('api_keys', 'tenants', 'alembic_version')
+                        """
+                    )
+                ).all()
+            }
+            unprotected = (
+                session.execute(
+                    text(
+                        """
+                    SELECT c.relname
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    JOIN information_schema.columns col
+                      ON col.table_name = c.relname AND col.table_schema = n.nspname
+                    WHERE n.nspname = 'public' AND c.relkind = 'r'
+                      AND col.column_name = 'tenant_id'
+                      AND c.relname <> 'api_keys'
+                      AND NOT (c.relrowsecurity AND c.relforcerowsecurity
+                               AND EXISTS (SELECT 1 FROM pg_policies p
+                                           WHERE p.tablename = c.relname))
+                    """
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    except Exception as exc:  # an unreachable database is not a failed check
+        rep.unsupported_by_localstack(
+            "database control-plane grants",
+            f"no database reachable from here ({type(exc).__name__}); "
+            "tests/test_isolation.py is the authoritative check",
+        )
+        return
+
+    api_key_grants = {priv for table, priv in grants if table == "api_keys"}
+    rep.check(
+        "api_keys is SELECT-only for the app role",
+        api_key_grants == {"SELECT"},
+        "SELECT only — the app can authenticate, not mint",
+        on_fail=f"grants are {sorted(api_key_grants)}; the app role can forge credentials",
+    )
+
+    tenant_grants = {priv for table, priv in grants if table == "tenants"}
+    rep.check(
+        "tenants is SELECT-only for the app role",
+        tenant_grants == {"SELECT"},
+        "SELECT only",
+        on_fail=f"grants are {sorted(tenant_grants)}",
+    )
+
+    rep.check(
+        "alembic_version is unreachable by the app role",
+        not any(table == "alembic_version" for table, _ in grants),
+        "no grants",
+        on_fail="the app role can rewrite migration state",
+    )
+
+    rep.check(
+        "every tenant-scoped table has a forced isolation policy",
+        not unprotected,
+        "all tenant tables protected",
+        on_fail=f"UNPROTECTED: {sorted(unprotected)}",
+    )
+
+
 def check_unrepresentable(rep: Report) -> None:
     rep.unsupported_by_localstack(
         "ECR repositories + lifecycle policy",
@@ -500,6 +596,7 @@ def main() -> int:
     check_notification_delivers(rep, s3, sqs, out)
     check_redrive_behaviour(rep, sqs, out)
     check_app_assert_path(rep, args.endpoint, out)
+    check_database_grants(rep)
     check_unrepresentable(rep)
 
     code = rep.render()

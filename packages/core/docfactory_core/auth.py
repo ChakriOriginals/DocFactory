@@ -7,9 +7,18 @@ hash, so the comparison is against a value the database never held in the
 clear.
 
 `api_keys` and `tenants` deliberately carry no RLS policy: authentication has
-to read them *before* any tenant context exists. They are readable by the
-application role and writable only by the owner, so a compromised application
-role cannot mint itself a key.
+to read them *before* any tenant context exists, and a tenant-scoped policy
+would compare against an unset `app.tenant_id` and fail every login. They are
+protected by GRANT instead — the application role holds `SELECT` and nothing
+else, so a compromised application role cannot mint itself a key.
+
+That was the intent from Phase 3a and it was not true until 4d: the REVOKE
+covered `tenants` alone, and the app role could issue a valid key for any
+tenant. Issuance and revocation therefore run on the OWNER connection here, not
+just as a matter of grants — in a deployed task `DATABASE_ADMIN_URL` is unset
+(only the one-off migrate task holds the owner secret), so an API process that
+somehow reached these functions fails to connect rather than succeeding
+quietly. The grant and the code path say the same thing.
 """
 
 import hashlib
@@ -20,7 +29,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 
-from docfactory_core.db import session_scope
+from docfactory_core.db import admin_session_scope, session_scope
 from docfactory_core.models import ApiKey, Tenant, TenantStatus
 
 log = logging.getLogger(__name__)
@@ -48,9 +57,15 @@ def hash_key(plaintext: str) -> str:
 
 
 def issue_api_key(tenant_id: str, name: str, *, plaintext: str | None = None) -> IssuedKey:
-    """Mint a key for a tenant. `plaintext` is for seeding/tests only."""
+    """Mint a key for a tenant. OWNER-ONLY. `plaintext` is for seeding/tests only.
+
+    An administrative action, not an application one: minting a credential for
+    a tenant is exactly the operation a compromised task must not be able to
+    perform. Runs on the owner connection, which a deployed API or worker task
+    does not have.
+    """
     plaintext = plaintext or f"{_KEY_PREFIX}{secrets.token_urlsafe(_KEY_BYTES)}"
-    with session_scope(require_tenant=False) as session:
+    with admin_session_scope() as session:
         if session.get(Tenant, tenant_id) is None:
             raise AuthError(f"unknown tenant {tenant_id}")
         key = ApiKey(
@@ -69,7 +84,8 @@ def issue_api_key(tenant_id: str, name: str, *, plaintext: str | None = None) ->
 
 
 def revoke_api_key(key_id: str) -> None:
-    with session_scope(require_tenant=False) as session:
+    """Retire a key. OWNER-ONLY, for the same reason as issuance."""
+    with admin_session_scope() as session:
         key = session.get(ApiKey, key_id)
         if key is None:
             raise AuthError("unknown key")
