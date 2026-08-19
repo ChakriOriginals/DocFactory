@@ -12,10 +12,19 @@ reason RLS was chosen over filtering in the ORM, and it must stay in CI.
 Preconditions that make the policies real, asserted here rather than assumed:
 the application role is not a superuser and does not have BYPASSRLS, and every
 tenant-scoped table has RLS both enabled and FORCEd.
+
+The table list is DISCOVERED FROM THE LIVE SCHEMA, not hardcoded. That is the
+lesson of the 4d audit: `pipelines` went two phases without a policy because
+`ALTER DEFAULT PRIVILEGES` grants every new table full read/write to the app
+role automatically while the policy that confines those grants has to be
+written by hand. A hardcoded list in this file would have gone stale in exactly
+the same silence. Add a table with a `tenant_id` and no policy now and
+`test_every_tenant_scoped_table_is_protected` goes red.
 """
 
 import socket
 import uuid
+from decimal import Decimal
 from urllib.parse import urlparse
 
 import pytest
@@ -27,15 +36,78 @@ from docfactory_core.models import (
     EvalCase,
     Extraction,
     ExtractionField,
+    Pipeline,
     ReviewStatus,
     ReviewTask,
     Tenant,
+    TenantRateLimit,
+    TenantSpend,
+    UsageEvent,
 )
 from sqlalchemy import delete, select, text
 
 pytestmark = pytest.mark.integration
 
-TENANT_TABLES = ("documents", "extractions", "extraction_fields", "review_tasks", "eval_cases")
+# The floor. Discovery must find at least these; if the query silently returned
+# nothing, the parametrized tests below would vacuously pass.
+KNOWN_TENANT_TABLES = frozenset(
+    {
+        "documents",
+        "extractions",
+        "extraction_fields",
+        "review_tasks",
+        "eval_cases",
+        "usage_events",
+        "tenant_spend",
+        "tenant_rate_limits",
+        "pipelines",
+    }
+)
+
+# Carries a tenant_id but deliberately has NO row policy. Authentication
+# resolves a key hash to a tenant *before* a tenant is bound, so a tenant-scoped
+# policy here would compare against an unset app.tenant_id and every login would
+# fail. It is protected by grant instead — SELECT only — which
+# TestControlPlaneTables asserts. See docs/tenant_isolation_audit.md.
+POLICY_EXEMPT = frozenset({"api_keys"})
+
+
+def _tenant_scoped_tables() -> tuple[str, ...]:
+    """Every table in the live schema with a tenant_id column.
+
+    Read at collection time so the parametrized tests below cover tables nobody
+    remembered to add here. Returns empty if the database is unreachable; the
+    suite skips in that case, and `test_discovery_actually_ran` makes sure an
+    empty result can never look like a pass.
+    """
+    try:
+        with admin_session_scope() as session:
+            return tuple(
+                session.execute(
+                    text(
+                        """
+                        SELECT c.relname
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN information_schema.columns col
+                          ON col.table_name = c.relname AND col.table_schema = n.nspname
+                        WHERE n.nspname = 'public' AND c.relkind = 'r'
+                          AND col.column_name = 'tenant_id'
+                        ORDER BY c.relname
+                        """
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    except Exception:  # collection must not fail on a stopped database
+        return ()
+
+
+DISCOVERED_TABLES = _tenant_scoped_tables()
+TENANT_TABLES = tuple(t for t in DISCOVERED_TABLES if t not in POLICY_EXEMPT) or tuple(
+    sorted(KNOWN_TENANT_TABLES)
+)
 OTHER = "acme-tenant"
 
 
@@ -63,7 +135,13 @@ def require_db():
 
 @pytest.fixture(scope="module")
 def other_tenant():
-    """A second tenant with a full row set: document, extraction, field, task, case."""
+    """A second tenant with a row in every tenant-scoped table.
+
+    "Every" is load-bearing. Before 4d this fixture stopped at the five tables
+    the Phase 3a migration protected, so the four added later — and the one
+    that had no policy at all — were never represented in a leak test. A
+    foreign row has to exist for "I cannot see it" to mean anything.
+    """
     with admin_session_scope() as session:
         if session.get(Tenant, OTHER) is None:
             session.add(Tenant(id=OTHER, name="Acme Corp"))
@@ -122,6 +200,47 @@ def other_tenant():
                 corrected_value="Acme Secret Supplier",
             )
         )
+    # The tables added after Phase 3a. usage_events and tenant_spend matter
+    # most of all of these: a tenant reading another's cost and billing data is
+    # the leak that ends a B2B conversation, and neither was covered until now.
+    usage_event_id = uuid.uuid4()
+    with admin_session_scope() as session:
+        session.add(
+            Pipeline(
+                tenant_id=OTHER,
+                slug="acme_secret_recipe",
+                version=1,
+                document_type="acme secret",
+                config={"fields": []},
+            )
+        )
+        session.add(
+            UsageEvent(
+                id=usage_event_id,
+                tenant_id=OTHER,
+                model="mock:mock-extractor-v1",
+                model_tier="frontier",
+                purpose="extract",
+                input_tokens=4242,
+                output_tokens=424,
+                cost_usd=Decimal("9.990000"),
+            )
+        )
+        session.execute(
+            text(
+                "INSERT INTO tenant_spend (tenant_id, spent_usd) VALUES (:t, 9.99) "
+                "ON CONFLICT (tenant_id) DO UPDATE SET spent_usd = 9.99"
+            ),
+            {"t": OTHER},
+        )
+        session.execute(
+            text(
+                "INSERT INTO tenant_rate_limits (tenant_id, tokens) VALUES (:t, 7) "
+                "ON CONFLICT (tenant_id) DO UPDATE SET tokens = 7"
+            ),
+            {"t": OTHER},
+        )
+
     acme_key = "dk_acme_test_key"
     try:
         resolve_tenant(acme_key)
@@ -132,10 +251,14 @@ def other_tenant():
         "tenant": OTHER,
         "document_id": document_id,
         "extraction_id": extraction_id,
+        "usage_event_id": usage_event_id,
+        "pipeline_slug": "acme_secret_recipe",
         "api_key": key.plaintext,
     }
     with admin_session_scope() as session:
         session.execute(delete(Document).where(Document.tenant_id == OTHER))
+        session.execute(delete(UsageEvent).where(UsageEvent.tenant_id == OTHER))
+        session.execute(delete(Pipeline).where(Pipeline.tenant_id == OTHER))
 
 
 class TestPreconditions:
@@ -178,6 +301,55 @@ class TestPreconditions:
             )
         assert "tenant_isolation" in policies
 
+    def test_discovery_actually_ran(self):
+        """An empty discovery would make every parametrized test above vacuous.
+
+        The failure mode this guards against is subtle: if the schema query
+        returned nothing, pytest would generate zero parametrized cases and the
+        suite would go green having asserted nothing at all.
+        """
+        assert DISCOVERED_TABLES, "schema discovery returned no tables"
+        missing = KNOWN_TENANT_TABLES - set(DISCOVERED_TABLES)
+        assert not missing, f"tables that should carry a tenant_id no longer do: {sorted(missing)}"
+
+    def test_every_tenant_scoped_table_is_protected(self):
+        """THE drift guard. Not parametrized — it is about the SET of tables.
+
+        Any table with a tenant_id must have RLS enabled, FORCEd, and a policy,
+        unless it is on the documented exemption list. A new tenant-scoped table
+        added without one fails here, in CI, before it can ship — which is the
+        thing that did not happen for `pipelines` between Phase 3b and 4d.
+        """
+        with admin_session_scope() as session:
+            rows = session.execute(
+                text(
+                    """
+                    SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+                           (SELECT count(*) FROM pg_policies p
+                             WHERE p.tablename = c.relname AND p.policyname = 'tenant_isolation')
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    JOIN information_schema.columns col
+                      ON col.table_name = c.relname AND col.table_schema = n.nspname
+                    WHERE n.nspname = 'public' AND c.relkind = 'r'
+                      AND col.column_name = 'tenant_id'
+                    """
+                )
+            ).all()
+
+        unprotected = [
+            {"table": name, "rls": rls, "forced": forced, "policies": policies}
+            for name, rls, forced, policies in rows
+            if name not in POLICY_EXEMPT and not (rls and forced and policies)
+        ]
+        assert not unprotected, (
+            "tenant-scoped tables with no enforced isolation policy: "
+            f"{unprotected}. Add ENABLE + FORCE ROW LEVEL SECURITY and a "
+            "tenant_isolation policy in a migration, or document the table in "
+            "POLICY_EXEMPT and docs/tenant_isolation_audit.md if it genuinely "
+            "cannot have one."
+        )
+
 
 class TestRowLevelIsolation:
     def test_unscoped_query_returns_no_foreign_rows(self, other_tenant):
@@ -191,7 +363,22 @@ class TestRowLevelIsolation:
         assert all(d.tenant_id == "dev-tenant" for d in every_document)
         assert other_tenant["document_id"] not in {d.id for d in every_document}
 
-    @pytest.mark.parametrize("model", [Document, Extraction, ExtractionField, ReviewTask, EvalCase])
+    @pytest.mark.parametrize(
+        "model",
+        [
+            Document,
+            Extraction,
+            ExtractionField,
+            ReviewTask,
+            EvalCase,
+            # Added in 4d. Pipeline had no policy at all until this phase;
+            # the other three had one and were simply never tested.
+            Pipeline,
+            UsageEvent,
+            TenantSpend,
+            TenantRateLimit,
+        ],
+    )
     def test_no_table_leaks_under_an_unscoped_select(self, other_tenant, model):
         with tenant_context("dev-tenant"), session_scope() as session:
             rows = session.scalars(select(model)).all()
@@ -259,6 +446,118 @@ class TestRowLevelIsolation:
                 assert session.scalars(select(Document)).all() == []
         finally:
             current_tenant.reset(token)
+
+
+class TestLateAddedTablesAreProtected:
+    """The tables the Phase 3a suite never covered.
+
+    Four of these were added after the original RLS migration and one of them —
+    `pipelines` — had no policy at all until 4d. Each gets the same three
+    assertions the original five have always had: the unscoped read, the
+    known-id read, and the cross-tenant write.
+    """
+
+    def test_another_tenants_pipeline_definition_is_invisible(self, other_tenant):
+        """A pipeline row is the tenant's schema, rules and routing policy.
+
+        Competitively meaningful configuration. Until 4d this table had full
+        app-role grants and no policy, and this query returned acme's row.
+        """
+        with tenant_context("dev-tenant"), session_scope() as session:
+            slugs = {row.slug for row in session.scalars(select(Pipeline)).all()}
+        assert other_tenant["pipeline_slug"] not in slugs
+
+    def test_the_owning_tenant_still_sees_its_pipeline(self, other_tenant):
+        """The policy must confine, not break. Isolation that hides your own
+        rows is an outage wearing a security badge."""
+        with tenant_context(OTHER), session_scope() as session:
+            slugs = {row.slug for row in session.scalars(select(Pipeline)).all()}
+        assert other_tenant["pipeline_slug"] in slugs
+
+    def test_writing_a_pipeline_for_another_tenant_is_refused(self, other_tenant):
+        from sqlalchemy.exc import DatabaseError
+
+        with (
+            pytest.raises(DatabaseError),
+            tenant_context("dev-tenant"),
+            session_scope() as session,
+        ):
+            session.add(
+                Pipeline(
+                    tenant_id=OTHER,
+                    slug="smuggled",
+                    version=99,
+                    document_type="smuggled",
+                    config={"fields": []},
+                )
+            )
+
+    def test_updating_another_tenants_pipeline_affects_nothing(self, other_tenant):
+        with tenant_context("dev-tenant"), session_scope() as session:
+            result = session.execute(
+                text("UPDATE pipelines SET is_active = false WHERE tenant_id = :t"), {"t": OTHER}
+            )
+            assert result.rowcount == 0
+        with tenant_context(OTHER), session_scope() as session:
+            row = session.scalars(select(Pipeline)).one()
+            assert row.is_active is True
+
+    def test_another_tenants_usage_events_are_invisible(self, other_tenant):
+        """Cost and token counts, per call. The B2B-deal-ending leak."""
+        with tenant_context("dev-tenant"), session_scope() as session:
+            assert session.get(UsageEvent, other_tenant["usage_event_id"]) is None
+            spend = session.execute(
+                text("SELECT coalesce(sum(cost_usd), 0) FROM usage_events")
+            ).scalar()
+        # acme's single event is $9.99; dev-tenant's whole history must be less.
+        assert spend < Decimal("9.99")
+
+    def test_writing_a_usage_event_for_another_tenant_is_refused(self, other_tenant):
+        from sqlalchemy.exc import DatabaseError
+
+        with (
+            pytest.raises(DatabaseError),
+            tenant_context("dev-tenant"),
+            session_scope() as session,
+        ):
+            session.add(
+                UsageEvent(
+                    tenant_id=OTHER,
+                    model="mock:mock-extractor-v1",
+                    model_tier="small",
+                    purpose="extract",
+                    cost_usd=Decimal("0.01"),
+                )
+            )
+
+    def test_another_tenants_spend_counter_is_invisible(self, other_tenant):
+        """tenant_spend is the row a budget cap is enforced against.
+
+        Reading it is reading the customer's bill; writing it is raising or
+        lowering their cap.
+        """
+        with tenant_context("dev-tenant"), session_scope() as session:
+            assert session.get(TenantSpend, OTHER) is None
+            rows = session.scalars(select(TenantSpend)).all()
+        assert all(row.tenant_id == "dev-tenant" for row in rows)
+
+    def test_another_tenants_spend_cannot_be_moved(self, other_tenant):
+        with tenant_context("dev-tenant"), session_scope() as session:
+            result = session.execute(
+                text("UPDATE tenant_spend SET spent_usd = 0 WHERE tenant_id = :t"), {"t": OTHER}
+            )
+            assert result.rowcount == 0
+        with tenant_context(OTHER), session_scope() as session:
+            assert session.get(TenantSpend, OTHER).spent_usd == Decimal("9.990000")
+
+    def test_another_tenants_rate_limit_bucket_is_invisible(self, other_tenant):
+        """Draining a neighbour's token bucket is a denial of service."""
+        with tenant_context("dev-tenant"), session_scope() as session:
+            assert session.get(TenantRateLimit, OTHER) is None
+            result = session.execute(
+                text("UPDATE tenant_rate_limits SET tokens = 0 WHERE tenant_id = :t"), {"t": OTHER}
+            )
+            assert result.rowcount == 0
 
 
 class TestSessionScoping:
