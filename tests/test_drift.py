@@ -8,6 +8,7 @@ the cold start, which is the specific case where a naive detector flags every
 new customer on their first day.
 """
 
+import json
 import uuid
 
 import pytest
@@ -134,6 +135,80 @@ class TestTheProfile:
         once = text_profile(STABLE_TEXT)
         padded = text_profile(STABLE_TEXT + " consulting hours" * 40)
         assert cosine_distance(once, padded) < 0.35
+
+
+class TestConfigChangesDoNotFailOpen:
+    def test_a_changed_profile_dimension_drops_the_signal_rather_than_zeroing_it(self, clean_state):
+        """A stale centroid must make the signal UNAVAILABLE, not "identical".
+
+        cosine_distance returns 0.0 for mismatched lengths, and 0.0 reads as
+        "this document is exactly the baseline" — the most reassuring possible
+        wrong answer, and one that would silently guarantee text_distance never
+        fires again after a config change.
+        """
+        config = get_drift_config()
+        feed(config["baseline_n"], body=STABLE_TEXT, jitter=0.04)
+
+        # Shrink the stored centroid, as a smaller profile_dim would.
+        with admin_session_scope() as session:
+            row = session.scalar(
+                text("SELECT centroid FROM drift_stats WHERE tenant_id = :t").bindparams(t=TENANT)
+            )
+            session.execute(
+                text(
+                    "UPDATE drift_stats SET centroid = CAST(:c AS jsonb) WHERE tenant_id = :t"
+                ).bindparams(c=json.dumps(row[:8]), t=TENANT)
+            )
+
+        after = feed(1, body=DRIFTED_TEXT, confidence=0.95, passing=True)[0]
+        assert "text_distance" not in after.values, (
+            "a stale centroid produced a distance instead of dropping the signal"
+        )
+        # The other two signals keep working.
+        assert "doc_confidence" in after.z_scores
+
+
+class TestMonitoringCannotBreakThePipeline:
+    """A drift bug must never cost a document.
+
+    The observation runs inside the extraction transaction — that is what makes
+    it atomic with the row it describes, and also what makes an exception here
+    catastrophic: the extraction rolls back, the message redelivers, and after
+    max_receive_count the document is in the DLQ. Monitoring would have
+    destroyed the thing it was monitoring. This was not hypothetical: raising
+    profile_dim left stale centroids that raised inside the observation and
+    failed four *extraction* tests.
+    """
+
+    def test_a_stale_centroid_does_not_raise_during_baseline(self, clean_state):
+        """The dimension can change mid-baseline too, not only after it."""
+        feed(3, body=STABLE_TEXT)
+        with admin_session_scope() as session:
+            row = session.scalar(
+                text("SELECT centroid FROM drift_stats WHERE tenant_id = :t").bindparams(t=TENANT)
+            )
+            session.execute(
+                text(
+                    "UPDATE drift_stats SET centroid = CAST(:c AS jsonb) WHERE tenant_id = :t"
+                ).bindparams(c=json.dumps(row[:8]), t=TENANT)
+            )
+        # Must not raise, and must keep counting.
+        after = feed(1, body=STABLE_TEXT)[0]
+        assert after.n_observed == 4
+
+    def test_the_handler_swallows_a_failing_observation(self):
+        """The wrapper the worker calls, exercised directly."""
+        from docfactory_worker.handlers import _observe_drift_safely
+
+        _observe_drift_safely(
+            tenant_id=TENANT,
+            doc_type=DOC_TYPE,
+            doc_confidence=0.9,
+            validation_passed=True,
+            text=STABLE_TEXT,
+            document_id=None,
+            session=object(),  # not a session; observe() will raise on it
+        )
 
 
 class TestColdStart:

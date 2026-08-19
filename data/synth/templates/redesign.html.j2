@@ -1,0 +1,113 @@
+{# The vendor's rebrand: the drift experiment's layout (4e.3).
+
+   Same company, same arithmetic, same page — new house style. What moved:
+
+     Subtotal   -> Net Amount
+     Sales Tax  -> VAT
+     Total Due  -> Balance Owing
+
+   That is the whole change, and it is deliberately the whole change. The mock
+   extractor reads amounts by label, exactly as a real extraction prompt reads
+   them by name, so a renamed total is a total it cannot find. Everything else
+   — the table headers, the date order, the invoice-number scheme — is held
+   fixed so the experiment measures one variable.
+
+   Rendered with a different palette and layout as well, because a real rebrand
+   changes the wording around the numbers too, and the text-distance signal
+   should have something to see.
+#}
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: Letter; margin: 16mm 15mm; }
+  body { font-family: Georgia, "Times New Roman", serif;
+         font-size: 10pt; color: #22201d; }
+  .band { background: #7a2e2e; color: #fff; padding: 7mm 6mm; }
+  .band .doc-title { font-size: 22pt; letter-spacing: 3px; font-weight: normal; }
+  .band .vendor-name { font-size: 13pt; font-weight: bold; margin-top: 3mm; }
+  .band .muted { color: #f0dede; font-size: 9pt; line-height: 1.4; }
+  .cols { width: 100%; border-collapse: collapse; margin-top: 8mm; }
+  .cols td { vertical-align: top; width: 50%; padding-right: 8mm; }
+  .caption { font-size: 8pt; letter-spacing: 1.5px; color: #7a2e2e;
+             text-transform: uppercase; border-bottom: 1px solid #ddd2d2;
+             padding-bottom: 1mm; }
+  .name { font-weight: bold; margin-top: 2mm; }
+  .muted { color: #6b625c; font-size: 9pt; line-height: 1.45; }
+  .refs td { padding: 1.5mm 0; font-size: 9.5pt; }
+  .refs .k { color: #6b625c; padding-right: 6mm; }
+  .refs .v { font-weight: bold; }
+  .items { width: 100%; border-collapse: collapse; margin-top: 9mm; }
+  .items th { border-bottom: 2px solid #7a2e2e; text-align: left;
+              padding: 3mm 2mm; font-size: 8.5pt; letter-spacing: 0.5px;
+              color: #7a2e2e; }
+  .items td { padding: 2.5mm 2mm; border-bottom: 1px solid #ece5e5; }
+  .num { text-align: right; }
+  .totals { margin-top: 6mm; margin-left: auto; border-collapse: collapse; }
+  .totals td { padding: 1.5mm 0 1.5mm 26mm; text-align: right; }
+  .totals .label { color: #6b625c; }
+  .totals .grand td { font-size: 12.5pt; font-weight: bold; color: #7a2e2e;
+                      border-top: 2px solid #7a2e2e; padding-top: 3mm; }
+  .footer { margin-top: 14mm; font-size: 8.5pt; color: #6b625c;
+            border-top: 1px solid #ece5e5; padding-top: 4mm; }
+</style>
+</head>
+<body>
+  <div class="band">
+    <div class="doc-title">INVOICE</div>
+    <div class="vendor-name">{{ inv.vendor.name }}</div>
+    <div class="muted">
+      {% for line in inv.vendor.address_lines %}{{ line }}<br>{% endfor %}
+      {% if inv.vendor.email %}{{ inv.vendor.email }}{% endif %}
+    </div>
+  </div>
+
+  <table class="cols">
+    <tr>
+      <td>
+        <div class="caption">Billed To</div>
+        <div class="name">{{ inv.bill_to.name }}</div>
+        <div class="muted">
+          {% for line in inv.bill_to.address_lines %}{{ line }}<br>{% endfor %}
+        </div>
+      </td>
+      <td>
+        <div class="caption">References</div>
+        <table class="refs">
+          <tr><td class="k">Invoice No.</td><td class="v">{{ inv.invoice_number }}</td></tr>
+          <tr><td class="k">Invoice Date</td><td class="v">{{ inv.invoice_date | date_us }}</td></tr>
+          <tr><td class="k">Due Date</td><td class="v">{{ inv.due_date | date_us }}</td></tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <table class="items">
+    <tr>
+      <th style="width:55%">DESCRIPTION</th>
+      <th class="num" style="width:10%">QTY</th>
+      <th class="num" style="width:17%">UNIT PRICE</th>
+      <th class="num" style="width:18%">AMOUNT</th>
+    </tr>
+    {% for item in inv.line_items %}
+    <tr>
+      <td>{{ item.description }}</td>
+      <td class="num">{{ item.quantity }}</td>
+      <td class="num">{{ item.unit_price | usd }}</td>
+      <td class="num">{{ item.amount | usd }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <table class="totals">
+    <tr><td class="label">Net Amount</td><td>{{ inv.subtotal | usd }}</td></tr>
+    <tr><td class="label">VAT ({{ inv.tax_rate | pct }})</td><td>{{ inv.tax | usd }}</td></tr>
+    <tr class="grand"><td class="label">Balance Owing</td><td>{{ inv.total | usd }}</td></tr>
+  </table>
+
+  <div class="footer">
+    Remittance advice appreciated. {{ inv.payment_note }}
+  </div>
+</body>
+</html>

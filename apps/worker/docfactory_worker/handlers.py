@@ -518,6 +518,46 @@ def _definition_for(doc_type: str | None) -> PipelineDefinition:
         return default_pipeline()
 
 
+def _observe_drift_safely(**kwargs) -> None:
+    """Fold a document into its tenant's drift state, and never fail because of it.
+
+    This runs inside the extraction transaction, which is what makes the
+    observation atomic with the row it describes — and also what makes a bug
+    here dangerous: an exception would roll the extraction back, the message
+    would redeliver, and after `max_receive_count` the document would land in
+    the DLQ. Monitoring would have destroyed the thing it was monitoring.
+
+    So the detector is allowed to fail quietly. Losing a drift observation
+    costs a data point in a rolling baseline; losing a document costs a
+    document. (A database-level error still aborts the transaction, and should:
+    that is not a drift bug, it is the transaction failing.)
+
+    Found the hard way — a profile-dimension change left stale centroids that
+    raised inside this call and failed four worker tests, which were extraction
+    tests, not drift tests.
+    """
+    try:
+        observation = observe_drift(**kwargs)
+    except Exception:
+        log.exception(
+            "drift observation failed; continuing",
+            extra={"document_id": str(kwargs.get("document_id"))},
+        )
+        return
+    if observation.newly_flagged:
+        # Recorded and observable, not paged. Alerting is the ops surface that
+        # waits for the deployed environment.
+        log.warning(
+            "drift detected",
+            extra={
+                "doc_type": observation.doc_type,
+                "signals": list(observation.flagged),
+                "z_scores": {k: round(v, 3) for k, v in observation.z_scores.items()},
+                "n_observed": observation.n_observed,
+            },
+        )
+
+
 def _store_extraction(
     document_id: uuid.UUID,
     tenant_id: str,
@@ -565,7 +605,7 @@ def _store_extraction(
         # being counted. Costs one row update and no model call — every input
         # was computed above.
         if source_text is not None:
-            observation = observe_drift(
+            _observe_drift_safely(
                 tenant_id=tenant_id,
                 doc_type=definition.slug,
                 doc_confidence=extraction.doc_confidence,
@@ -574,18 +614,6 @@ def _store_extraction(
                 document_id=document_id,
                 session=session,
             )
-            if observation.newly_flagged:
-                # Recorded and observable, not paged. Alerting is the ops
-                # surface that waits for the deployed environment.
-                log.warning(
-                    "drift detected",
-                    extra={
-                        "doc_type": observation.doc_type,
-                        "signals": list(observation.flagged),
-                        "z_scores": {k: round(v, 3) for k, v in observation.z_scores.items()},
-                        "n_observed": observation.n_observed,
-                    },
-                )
         if record is not None:
             for name, value in _flatten_fields(record, definition).items():
                 session.add(

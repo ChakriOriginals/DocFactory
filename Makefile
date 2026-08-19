@@ -23,7 +23,7 @@ LS_TARGETS := \
 	-target='aws_iam_openid_connect_provider.github[0]' \
 	-target='aws_iam_role.github_deploy[0]'
 
-.PHONY: setup up down seed test lint fmt eval eval-gate costs migrate calibrate calibrate-fit \
+.PHONY: setup up down seed test lint fmt eval eval-gate costs migrate calibrate calibrate-fit drift-experiment \
 	localstack-up localstack-down localstack-apply localstack-verify localstack-destroy localstack-cycle
 
 .env:
@@ -85,6 +85,13 @@ eval: .env
 ## Unit-cost rollup from recorded usage events (what the worker actually spent).
 costs: .env
 	uv run python -m docfactory_evals.costs
+
+## The template-swap drift experiment (4e.3): stage a vendor format change,
+## measure detection lag against the quality of what was auto-approved, and
+## run a no-swap control. Renders ~170 PDFs, so it takes a few minutes; mock
+## mode, so it costs nothing. Writes docs/drift_experiment.md + the plot.
+drift-experiment: .env
+	DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python -m docfactory_evals.drift_experiment
 
 ## The CI gate: re-run the golden sets and fail if any type drops below its
 ## floor in config/eval_thresholds.json. Mock mode only — free and deterministic.

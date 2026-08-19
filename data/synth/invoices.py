@@ -19,6 +19,24 @@ from decimal import ROUND_HALF_UP, Decimal
 from faker import Faker
 
 LAYOUTS = ("classic", "modern", "euro")
+
+# The drift experiment's layout, and DELIBERATELY NOT IN `LAYOUTS`.
+#
+# "Their vendor changed invoice formats" is the scenario in this project's
+# problem statement, and 4e stages it for real. `redesign` is the same vendor,
+# the same arithmetic, printed under new labels: "Net Amount" for Subtotal,
+# "VAT" for Sales Tax, "Balance Owing" for Total Due. The mock extractor reads
+# amounts by label, so it degrades exactly the way a real label-driven
+# extraction prompt degrades on a redesigned document — the totals go missing
+# and the derived values are wrong, while the page is still perfectly readable
+# to a human.
+#
+# It stays out of `LAYOUTS` on purpose. The golden set is a hash-stable split
+# of the corpus, so a fourth layout in the default mix would change which
+# documents are golden, move the invoice eval numbers, and make the drift
+# experiment a corpus change rather than a measurement. Callers opt in.
+DRIFT_LAYOUTS = ("redesign",)
+
 SCAN_FRACTION = 0.3
 TEMPLATE_VAR = "inv"
 CENT = Decimal("0.01")
@@ -141,7 +159,9 @@ def _unit_price(rng: random.Random) -> Decimal:
 
 def _line_items(rng: random.Random, layout: str) -> tuple[LineItem, ...]:
     # The modern layout is the designated multi-row stress case.
-    counts = {"classic": (1, 5), "modern": (6, 12), "euro": (2, 7)}
+    # `redesign` matches `classic`'s row counts: the drift experiment is about
+    # the labels changing, and a different table size would confound it.
+    counts = {"classic": (1, 5), "modern": (6, 12), "euro": (2, 7), "redesign": (1, 5)}
     n = rng.randint(*counts[layout])
     pool = DE_ITEMS if layout == "euro" else EN_ITEMS
     months = DE_MONTHS if layout == "euro" else EN_MONTHS
@@ -183,12 +203,24 @@ def _invoice_number(rng: random.Random, layout: str, issued: date) -> str:
         return f"INV-{issued.year}-{rng.randint(1_000, 99_999):05d}"
     if layout == "modern":
         return f"{issued.year}{issued.month:02d}-{rng.randint(100, 9_999):04d}"
+    if layout == "redesign":
+        # Same scheme as classic. The redesign changes how amounts are
+        # labelled and nothing else, so the experiment measures one thing.
+        return f"INV-{issued.year}-{rng.randint(1_000, 99_999):05d}"
     return f"RE-{issued.year}/{rng.randint(100, 9_999):04d}"
 
 
-def generate_invoice(index: int, rng: random.Random, fake_us: Faker, fake_de: Faker) -> Invoice:
-    layout = rng.choice(LAYOUTS)
-    scanned = rng.random() < SCAN_FRACTION
+def generate_invoice(
+    index: int,
+    rng: random.Random,
+    fake_us: Faker,
+    fake_de: Faker,
+    *,
+    layouts: tuple[str, ...] = LAYOUTS,
+    scan_fraction: float = SCAN_FRACTION,
+) -> Invoice:
+    layout = rng.choice(layouts)
+    scanned = rng.random() < scan_fraction
 
     invoice_date = REFERENCE_DATE - timedelta(days=rng.randint(0, 700))
     due_date = invoice_date + timedelta(days=rng.choice((14, 30, 45, 60)))
@@ -238,13 +270,34 @@ def render_context(invoice: Invoice) -> dict:
     return {TEMPLATE_VAR: invoice}
 
 
-def generate_corpus(count: int, seed: int) -> list[Invoice]:
+def generate_corpus(
+    count: int,
+    seed: int,
+    *,
+    layouts: tuple[str, ...] = LAYOUTS,
+    scan_fraction: float = SCAN_FRACTION,
+    start_index: int = 0,
+) -> list[Invoice]:
+    """The corpus, from one seed.
+
+    The keyword arguments all default to exactly the previous behaviour, so the
+    500-document invoice corpus and its golden split are byte-for-byte what
+    they were. They exist for the drift experiment, which needs one specific
+    layout and no scanned documents — a scanned page produces `needs_ocr` and
+    never reaches extraction, so it would silently shorten the stream the
+    detector sees.
+    """
     rng = random.Random(seed)
     fake_us = Faker("en_US")
     fake_de = Faker("de_DE")
     fake_us.seed_instance(rng.getrandbits(32))
     fake_de.seed_instance(rng.getrandbits(32))
-    return [generate_invoice(i + 1, rng, fake_us, fake_de) for i in range(count)]
+    return [
+        generate_invoice(
+            start_index + i + 1, rng, fake_us, fake_de, layouts=layouts, scan_fraction=scan_fraction
+        )
+        for i in range(count)
+    ]
 
 
 def ground_truth_record(invoice: Invoice, s3_key: str) -> dict:

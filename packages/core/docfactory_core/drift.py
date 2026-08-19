@@ -48,6 +48,7 @@ explained a past detection.
 
 import hashlib
 import json
+import logging
 import math
 import re
 import uuid
@@ -60,6 +61,8 @@ from sqlalchemy import select
 
 from docfactory_core.db import session_scope
 from docfactory_core.models import DriftStat
+
+log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "drift.json"
 
@@ -288,8 +291,25 @@ def _observe(
         values["doc_confidence"] = float(doc_confidence)
     if validation_passed is not None:
         values["validation_failure"] = 0.0 if validation_passed else 1.0
-    if centroid is not None:
+    if centroid is not None and len(centroid) == len(profile):
         values["text_distance"] = cosine_distance(profile, centroid)
+    elif centroid is not None:
+        # profile_dim changed under a live baseline. The stored centroid is
+        # not comparable, so the signal is UNAVAILABLE — which is a different
+        # thing from "distance zero", and the difference matters: a zero
+        # distance reads as "this document is identical to the baseline",
+        # which is the most reassuring possible wrong answer. Dropping the
+        # signal degrades detection to the other two; returning zero would
+        # quietly guarantee it never fires.
+        log.warning(
+            "text profile dimension changed; text_distance is unavailable until re-baselined",
+            extra={
+                "tenant_id": tenant_id,
+                "doc_type": doc_type,
+                "stored_dim": len(centroid),
+                "config_dim": len(profile),
+            },
+        )
 
     n_observed = row.n_observed + 1
     collecting = n_observed <= baseline_n
@@ -301,14 +321,23 @@ def _observe(
         # Baseline documents define normal; they are never judged against it.
         for signal, value in values.items():
             stats[signal] = _welford_update(stats.get(signal, {}), value)
-        centroid = (
-            profile
-            if centroid is None
-            else [
+        if centroid is None or len(centroid) != len(profile):
+            # None on the first document; a length mismatch when profile_dim
+            # changed under a live baseline. Either way the only sane centroid
+            # is this document's profile — and the mismatch case must not raise,
+            # because this runs inside the extraction transaction and an
+            # exception here would fail a document over a monitoring detail.
+            if centroid is not None:
+                log.warning(
+                    "text profile dimension changed; restarting the centroid",
+                    extra={"tenant_id": tenant_id, "doc_type": doc_type},
+                )
+            centroid = profile
+        else:
+            centroid = [
                 existing + (new - existing) / n_observed
                 for existing, new in zip(centroid, profile, strict=True)
             ]
-        )
         row.status = STATUS_STABLE if n_observed >= baseline_n else STATUS_BASELINE
     else:
         for signal, value in values.items():
