@@ -41,6 +41,7 @@ from docfactory_core.confidence_model import (
 )
 from docfactory_core.config import get_settings
 from docfactory_core.db import current_tenant, session_scope, tenant_context
+from docfactory_core.drift import observe as observe_drift
 from docfactory_core.extraction import (
     ExtractionOutcome,
     build_system_prompt,
@@ -316,6 +317,7 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
                 confidence=failed_extraction_report(outcome.error),
                 definition=definition,
                 cost_usd=spend,
+                source_text=text,
             )
             _record_failure(document_id, f"extraction invalid: {outcome.error}", final=True)
             span.set_attribute("outcome", "invalid_extraction")
@@ -331,6 +333,7 @@ def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool
             routing,
             definition,
             cost_usd=spend,
+            source_text=text,
         )
         span.set_attribute("outcome", routing.decision)
         span.set_attribute("validation.passed", all(validation.values()))
@@ -525,6 +528,7 @@ def _store_extraction(
     routing: RoutingDecision | None = None,
     definition: PipelineDefinition | None = None,
     cost_usd: Decimal | None = None,
+    source_text: str | None = None,
 ) -> None:
     definition = definition or default_pipeline()
     queued_for_review: uuid.UUID | None = None
@@ -555,6 +559,33 @@ def _store_extraction(
         )
         session.add(extraction)
         session.flush()
+
+        # Drift, in the same transaction as the row it describes: a document
+        # cannot be counted into a baseline without existing, or exist without
+        # being counted. Costs one row update and no model call — every input
+        # was computed above.
+        if source_text is not None:
+            observation = observe_drift(
+                tenant_id=tenant_id,
+                doc_type=definition.slug,
+                doc_confidence=extraction.doc_confidence,
+                validation_passed=extraction.validation_passed,
+                text=source_text,
+                document_id=document_id,
+                session=session,
+            )
+            if observation.newly_flagged:
+                # Recorded and observable, not paged. Alerting is the ops
+                # surface that waits for the deployed environment.
+                log.warning(
+                    "drift detected",
+                    extra={
+                        "doc_type": observation.doc_type,
+                        "signals": list(observation.flagged),
+                        "z_scores": {k: round(v, 3) for k, v in observation.z_scores.items()},
+                        "n_observed": observation.n_observed,
+                    },
+                )
         if record is not None:
             for name, value in _flatten_fields(record, definition).items():
                 session.add(

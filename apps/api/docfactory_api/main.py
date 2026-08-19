@@ -24,6 +24,7 @@ from docfactory_core.bootstrap import ensure_infra
 from docfactory_core.budget import budget_state
 from docfactory_core.config import get_settings
 from docfactory_core.db import current_tenant, session_scope
+from docfactory_core.drift import drift_status
 from docfactory_core.logging import configure_logging, document_id_var
 from docfactory_core.metering import unit_costs
 from docfactory_core.models import (
@@ -149,6 +150,24 @@ class UsageRollup(BaseModel):
     cost_by_tier_usd: dict[str, float]
 
 
+class DriftView(BaseModel):
+    """Drift state for one document type.
+
+    Observable, not alerted: this phase makes drift something an operator can
+    read, and stops short of paging them. Alerting belongs with the SLA
+    burn-rate surface, which waits for the deployed environment.
+    """
+
+    doc_type: str
+    # "baseline" (still learning — makes no claims), "stable", "drifting"
+    status: str
+    n_observed: int
+    baseline_n: int
+    flagged_signals: list[str]
+    first_flagged_at: datetime | None
+    signals: dict[str, dict]
+
+
 class SpendSummary(BaseModel):
     tenant_id: str
     spent_usd: float
@@ -160,6 +179,8 @@ class SpendSummary(BaseModel):
     # is the metric worker autoscaling will target on AWS.
     in_flight: int
     queue_depth: dict[str, int]
+    # Per document type. Empty until a tenant has processed anything.
+    drift: list[DriftView]
 
 
 class ReviewTaskSummary(BaseModel):
@@ -346,6 +367,18 @@ def get_usage() -> SpendSummary:
                 get_settings().extract_queue,
             )
         },
+        drift=[
+            DriftView(
+                doc_type=row.doc_type,
+                status=row.status,
+                n_observed=row.n_observed,
+                baseline_n=row.baseline_n,
+                flagged_signals=list(row.flagged_signals),
+                first_flagged_at=row.first_flagged_at,
+                signals=row.signals,
+            )
+            for row in drift_status(tenant_id)
+        ],
         unit_costs=[
             UsageRollup(
                 pipeline_slug=row.pipeline_slug,

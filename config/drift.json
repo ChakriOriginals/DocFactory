@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Drift detector parameters. Config, never constants — the same discipline",
+    "as the review threshold and the SLA: changing how sensitive detection is",
+    "must not be a code change.",
+    "",
+    "baseline_n: documents of stable operation that define the baseline. Below",
+    "  this the detector reports 'baseline' and makes NO drift claims — the",
+    "  cold-start guard. 50 is enough for a usable std on a rate around a few",
+    "  percent and small enough that a new tenant is protected within a day.",
+    "",
+    "z_threshold: standard deviations from the baseline mean before a document",
+    "  counts as a breach. 3.0 is ~0.1% of a normal tail per signal per",
+    "  document; with 3 signals that is a false breach every ~110 documents,",
+    "  which is why breaches alone do not raise drift.",
+    "",
+    "consecutive_k: consecutive breaching documents on ONE signal before drift",
+    "  is declared. This is what separates a weird document from a changed",
+    "  format. At k=3 the chance of a false flag is (0.001)^3 per signal —",
+    "  once in ~330 million documents — while a genuine format change breaches",
+    "  every document and is caught in 3.",
+    "",
+    "min_std: floor on the baseline standard deviation, so a signal that never",
+    "  varied in the baseline cannot produce an infinite z-score. Rate signals",
+    "  use a Laplace-smoothed Bernoulli sigma instead and ignore this."
+  ],
+  "baseline_n": 50,
+  "z_threshold": 3.0,
+  "consecutive_k": 3,
+  "min_std": 0.01,
+  "profile_dim": 64
+}

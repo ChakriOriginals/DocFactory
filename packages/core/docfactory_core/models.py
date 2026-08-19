@@ -355,6 +355,70 @@ class TenantRateLimit(Base):
     )
 
 
+class DriftStat(Base):
+    """Rolling baseline and drift state for one tenant's document type.
+
+    One row per (tenant, doc_type, window). It holds the baseline the detector
+    compares against AND the running state of that comparison, because both are
+    updated by the same event — a document arriving — and splitting them would
+    mean two writes that could disagree.
+
+    `stats` carries Welford accumulators per signal, so the baseline is built
+    in one pass with no stored history: a running mean, an M2 for the variance,
+    and the consecutive-breach counter that makes a single odd document
+    something other than an incident. `centroid` is the mean lexical profile of
+    the baseline's text, which is what a new document's text distance is
+    measured against.
+
+    Nothing here requires a model call. Every input is already computed by the
+    time a document finishes extracting — that is the design constraint:
+    drift detection that doubles inference cost defeats its own purpose.
+    """
+
+    __tablename__ = "drift_stats"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    doc_type: Mapped[str] = mapped_column(Text, nullable=False)
+    # Which baseline this row is. Re-baselining after an acknowledged drift
+    # opens "baseline-2" rather than mutating history, so a past detection
+    # stays explicable by the numbers that produced it.
+    window_key: Mapped[str] = mapped_column(Text, nullable=False, server_default="baseline-1")
+
+    # "baseline"  still collecting; makes no drift claims (the cold-start guard)
+    # "stable"    baseline frozen, nothing breaching
+    # "drifting"  a signal breached on consecutive_k consecutive documents
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="baseline")
+
+    n_observed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Per-signal {mean, m2, n, consecutive, last_z}. JSONB rather than columns
+    # because the signal set is expected to grow and a new signal should not
+    # be a migration.
+    stats: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    # Mean lexical profile of the baseline's document text.
+    centroid: Mapped[list | None] = mapped_column(JSONB)
+    flagged_signals: Mapped[list | None] = mapped_column(JSONB)
+    first_flagged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Which document tripped it, so a flag can be traced to a page.
+    flagged_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL")
+    )
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "doc_type", "window_key", name="uq_drift_stats_window"),
+        CheckConstraint(
+            "status IN ('baseline', 'stable', 'drifting')", name="ck_drift_stats_status"
+        ),
+    )
+
+
 class ReviewStatus(enum.StrEnum):
     OPEN = "open"
     RESOLVED = "resolved"
