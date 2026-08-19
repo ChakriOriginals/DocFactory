@@ -8,11 +8,13 @@ started this audit was a migration whose comment claimed something its SQL did
 not do.
 
 Audited 2026-08-18 against the compose Postgres at migration head
-`089e1b235c11`.
+`089e1b235c11`. **All four gaps are closed** as of head `e5b2c1d8a3f7`; the
+before-and-after matrices are both below, because the interesting part of this
+document is the drift, not the end state.
 
 ---
 
-## The matrix
+## The matrix — BEFORE (head `089e1b235c11`)
 
 `S/I/U/D` = SELECT / INSERT / UPDATE / DELETE granted to `docfactory_app`.
 
@@ -140,6 +142,59 @@ one policy are what the audit found; the guard is what stops the next one.
 
 ---
 
+## The matrix — AFTER (head `e5b2c1d8a3f7`)
+
+Re-read from the live schema after both migrations:
+
+| table | `tenant_id`? | RLS enabled + FORCED | app grants | change |
+|---|:--:|:--:|:--:|---|
+| `documents` | yes | ✅ / ✅ | S I U D | — |
+| `extractions` | yes | ✅ / ✅ | S I U D | — |
+| `extraction_fields` | yes | ✅ / ✅ | S I U D | — |
+| `review_tasks` | yes | ✅ / ✅ | S I U D | — |
+| `eval_cases` | yes | ✅ / ✅ | S I U D | — |
+| `usage_events` | yes | ✅ / ✅ | S I U D | — |
+| `tenant_spend` | yes | ✅ / ✅ | S I U D | — |
+| `tenant_rate_limits` | yes | ✅ / ✅ | S I U D | — |
+| `pipelines` | yes | ✅ / ✅ | S I U D | **policy added** (`d4a1f0c9b7e2`) |
+| `api_keys` | yes | — (exempt, documented) | **S** | **I/U/D revoked** (`e5b2c1d8a3f7`) |
+| `tenants` | no | — | S | — |
+| `alembic_version` | no | — | **(none)** | **all revoked** (`e5b2c1d8a3f7`) |
+
+Behaviour, re-run as `docfactory_app` after the change:
+
+```
+  mint a key      -> InsufficientPrivilege: permission denied for table api_keys
+  update keys     -> InsufficientPrivilege
+  rewrite alembic -> InsufficientPrivilege
+  pipelines, unscoped SELECT  -> own rows only
+  pipelines, cross-tenant UPDATE -> 0 rows
+
+  resolve_tenant('dev-local-key')     -> dev-tenant      (login still works)
+  resolve_tenant('dk_acme_test_key')  -> acme-tenant
+```
+
+## What stops this happening again
+
+Four guards, in decreasing order of how often they run:
+
+| guard | where | runs |
+|---|---|---|
+| `test_every_tenant_scoped_table_is_protected` | `tests/test_isolation.py` | every CI push — reads the live schema and fails on any tenant-scoped table without a forced policy |
+| `test_api_keys_grants_are_exactly_select` + 10 more | `tests/test_isolation.py::TestControlPlaneTables` | every CI push |
+| `check_database_grants` | `infra/localstack/verify.py` | `make localstack-verify` |
+| `scripts/isolation_check.sql` | psql, against a **deployed** database | by hand, from the deploy runbook |
+
+The last one exists because CI's Postgres is a throwaway container and the
+deployed database is Neon. A green CI proves the migrations are correct; only a
+check against the real database proves the real database ran them.
+
+The test is the important one, and it is deliberately not parametrized over a
+list of names — it asserts a property of the *set* of tables. A list is the
+thing that went stale for two phases.
+
+---
+
 ## Control-plane access: the intended path
 
 Creating a tenant and minting an API key are **owner operations**. Neither is
@@ -152,6 +207,12 @@ either — the API surface is documents, usage and review, and nothing else.
 | mint an API key | owner | `issue_api_key(tenant_id, name)` — connects via `DATABASE_ADMIN_URL` |
 | revoke an API key | owner | `revoke_api_key(key_id)` — same |
 | resolve a key at login | **app** | `resolve_tenant(presented)` — unscoped `SELECT` on `api_keys`, the one legitimate cross-tenant read |
+
+**Confirmed end to end:** the API exposes no endpoint that touches `api_keys`
+or `tenants` — the surface is `/documents`, `/usage`, `/review/*`, `/healthz`
+and the internal storage-event bridge — and the `apps/` tree never imports
+`issue_api_key`, `revoke_api_key` or `admin_session_scope` at all. The grant
+was the only thing missing, not the path.
 
 `issue_api_key` and `revoke_api_key` moved from `session_scope()` to
 `admin_session_scope()` in this phase. That matters beyond tidiness: in a
@@ -169,7 +230,9 @@ from docfactory_core.auth import issue_api_key
 print(issue_api_key('dev-tenant', 'runbook').plaintext)"
 ```
 
-The plaintext is printed once and stored only as a hash.
+The plaintext is printed once and stored only as a hash. Note the variable:
+`DATABASE_URL` (the app role) would now fail with `permission denied`, which is
+the intended and useful error.
 
 ---
 
