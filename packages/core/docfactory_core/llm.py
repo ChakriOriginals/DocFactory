@@ -56,10 +56,29 @@ def get_llm_client(
 
     Routing picks the model id from the pipeline's tier; everything else in the
     system keeps talking to one interface.
+
+    CLIENTS ARE REUSED, not rebuilt per document. This is called once per
+    extraction attempt and again on every escalation, so a fresh client per
+    call means a fresh httpx connection pool per document — TLS handshakes
+    that did not need to happen, and file descriptors left to the garbage
+    collector to reclaim. Reuse is what the Anthropic SDK documents: the client
+    is thread-safe and intended to be long-lived.
+
+    Cached on (provider, model) rather than on the Settings object, which is
+    unhashable. Settings are themselves process-global via an lru_cache, so
+    this adds no staleness that was not already there — with one caveat worth
+    stating: changing MODEL_PROVIDER or the API key inside a live process will
+    not be picked up. Nothing does that; a task definition change rolls the
+    task.
     """
     settings = settings or get_settings()
-    if settings.model_provider == "anthropic":
-        return AnthropicLLMClient(settings, model=model)
+    return _client_for(settings.model_provider, model)
+
+
+@lru_cache(maxsize=8)
+def _client_for(provider: str, model: str | None) -> "MockLLMClient | AnthropicLLMClient":
+    if provider == "anthropic":
+        return AnthropicLLMClient(get_settings(), model=model)
     return MockLLMClient(model=model)
 
 
