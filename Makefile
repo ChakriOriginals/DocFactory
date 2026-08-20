@@ -29,7 +29,7 @@ LS_TARGETS := \
 	-target='aws_iam_role.github_deploy[0]'
 
 .PHONY: setup up down seed test lint fmt eval eval-gate costs migrate calibrate calibrate-fit drift-experiment \
-	aws-park aws-unpark aws-cost \
+	aws-park aws-unpark aws-cost heal \
 	localstack-up localstack-down localstack-apply localstack-verify localstack-destroy localstack-cycle
 
 .env:
@@ -106,6 +106,11 @@ eval-gate: .env
 
 migrate: .env
 	uv run alembic upgrade head
+
+## Force a healing sweep now: redrive what an outage dead-lettered, re-enqueue
+## anything stranded. Idempotent, and the worker does it every 5 minutes anyway.
+heal: .env
+	uv run python -m docfactory_core.healing
 
 # --- cost control on a deployed stack (4f-B) --------------------------------
 #

@@ -9,8 +9,10 @@
 #             read the depth of all three
 #   worker  — read/write the documents bucket, consume from all three queues
 #
-# Both may additionally resolve the DLQ URLs, and nothing more on them, because
-# the startup assertion checks that the DLQs exist.
+# Both may additionally resolve the DLQ URLs, because the startup assertion
+# checks that the DLQs exist. The worker alone may also receive and delete from
+# them, for the bounded redrive that recovers documents dead-lettered by a
+# provider outage — see `drain_dlqs` below for why that widening is safe.
 #
 # Neither can create a queue, delete a bucket, read another stack's secrets, or
 # touch IAM. The worker cannot send to the ALB's target group; the API cannot
@@ -92,6 +94,31 @@ data "aws_iam_policy_document" "resolve_dlq_urls" {
   }
 }
 
+# The worker, and ONLY the worker, may drain a DLQ back into its own queue.
+#
+# 4d deliberately gave neither role anything but GetQueueUrl on the DLQs, on
+# the grounds that draining one is a human action taken with human
+# credentials. 4f-C changes that on purpose and narrowly: a provider outage
+# lasting longer than three receives dead-letters every in-flight document, and
+# those are not poison — they are ordinary documents that arrived at a bad
+# moment. Waiting for a human to notice and drain them is not self-healing.
+#
+# The widening is bounded in three ways worth stating. It is receive+delete
+# only, so the worker still cannot create, purge or reconfigure a DLQ. It is
+# scoped to this stack's DLQ ARNs. And it crosses no tenant boundary: a DLQ
+# holds messages for documents this same role already processes, so the blast
+# radius of a compromised worker is unchanged.
+#
+# The API does NOT get this. It never consumes from any queue.
+data "aws_iam_policy_document" "drain_dlqs" {
+  statement {
+    sid       = "BoundedDeadLetterRedrive"
+    effect    = "Allow"
+    actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage"]
+    resources = [for queue in aws_sqs_queue.dlq : queue.arn]
+  }
+}
+
 data "aws_iam_policy_document" "documents_bucket" {
   statement {
     effect    = "Allow"
@@ -164,6 +191,7 @@ data "aws_iam_policy_document" "worker_task" {
   source_policy_documents = [
     data.aws_iam_policy_document.documents_bucket.json,
     data.aws_iam_policy_document.resolve_dlq_urls.json,
+    data.aws_iam_policy_document.drain_dlqs.json,
   ]
 
   # All three main queues, because the worker consumes from all three and hands

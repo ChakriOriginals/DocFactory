@@ -640,6 +640,7 @@ that most directly shortens the first apply.
 | 8 | worker stage hand-off + 4b defer | SendMessage | `sqs:SendMessage` | all 3 main | — | ✅ | ok |
 | 9 | `consumer.py` poll | ReceiveMessage | `sqs:ReceiveMessage` | 3 main | — | ✅ | ok |
 | 10 | `consumer.py` ack | DeleteMessage | `sqs:DeleteMessage` | 3 main | — | ✅ | ok |
+| 10b | `healing.py` `redrive_dlq` | ReceiveMessage, DeleteMessage | `sqs:ReceiveMessage`, `sqs:DeleteMessage` | **3 DLQ ARNs** | — | ✅ | **added in 4f-C** — bounded redrive after a provider outage; receive+delete only, worker only |
 | 11 | `backpressure.py` `queue_depth` | GetQueueAttributes | `sqs:GetQueueAttributes` | 3 main | ✅ | ✅ | ok |
 | 12 | — (no call site) | — | `s3:GetBucketLocation` | bucket ARN | ✅ | ✅ | **over-grant, kept deliberately** — boto3 issues it on a region redirect |
 | 13 | — (no call site) | — | `sqs:ChangeMessageVisibility` | — | — | — | **over-grant, REMOVED in 4c.5c** |

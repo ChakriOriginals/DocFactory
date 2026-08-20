@@ -99,6 +99,26 @@ class Settings(BaseSettings):
     # disables the batch path, leaving the API upload path alone.
     ingest_notify_target: str = ""
 
+    # --- self-healing (4f-C) ----------------------------------------------
+    # How often the worker sweeps for work the queue cannot recover on its
+    # own: documents committed but never enqueued, and DLQ messages left by an
+    # outage that has since cleared. 0 disables the sweeper entirely.
+    heal_interval_seconds: int = 300
+    # A document is only "stranded" if nothing could still be working on it.
+    # This MUST stay above the longest visibility timeout (extract, 90s) or the
+    # reaper races live messages and re-enqueues documents that were fine.
+    heal_stale_after_seconds: int = 900
+    # Times a dead-lettered message may be brought back before it is left dead.
+    # The bound is what stops a poison document looping between the two queues
+    # forever, burning a model call per lap.
+    dlq_max_redrives: int = 2
+
+    # Model-provider circuit breaker. Consecutive TRANSIENT failures before the
+    # fleet stops calling a provider that is evidently down, and how long it
+    # waits before letting one probe through.
+    breaker_threshold: int = 5
+    breaker_cooldown_seconds: int = 60
+
     # --- backpressure ----------------------------------------------------
     # Uploads per tenant per minute, and how much of that a burst may spend at
     # once. Over the rate is a 429 with Retry-After, never a silent drop.

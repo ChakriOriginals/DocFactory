@@ -62,6 +62,7 @@ from docfactory_core.pipeline import (
 from docfactory_core.pipeline_registry import default_pipeline, load_from_file
 from docfactory_core.pricing import call_cost_usd, estimate_input_tokens, worst_case_cost_usd
 from docfactory_core.queues import QueueBroker
+from docfactory_core.resilience import RetryPolicy, get_breaker, retry_transient
 from docfactory_core.review import ensure_review_task
 from docfactory_core.routing import default_policy, escalation_trigger, model_for_tier
 from docfactory_core.storage import ObjectStore
@@ -195,6 +196,9 @@ def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool =
 def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
     store, _ = _clients()
+
+    if _defer_if_provider_down(payload, get_settings().extract_queue, document_id):
+        return
 
     if _defer_if_saturated(
         payload, get_settings().extract_queue, current_tenant.get(), document_id
@@ -396,9 +400,22 @@ def _metered_extraction(
     if reservation is None:
         return None
 
+    breaker = _model_breaker()
     try:
-        outcome = run_extraction(text, client, definition)
+        # Breaker outside, retry inside. The retry handles a single unlucky
+        # call; the breaker handles a provider that is down, and it must see
+        # the whole retried attempt as one failure rather than three — three
+        # workers x three retries would otherwise open it on one bad minute.
+        outcome = breaker.call(
+            lambda: retry_transient(
+                lambda: run_extraction(text, client, definition),
+                policy=RetryPolicy(attempts=3, base_delay=0.5, max_delay=4.0),
+            )
+        )
     except Exception:
+        # The call did not happen, or did not produce an answer. Give the money
+        # back before re-raising: a reservation held for a call that never
+        # completed is spend the tenant never made.
         release(reservation)
         raise
 
@@ -481,6 +498,43 @@ def _defer_if_saturated(payload: dict, queue: str, tenant_id: str, document_id: 
             "in_flight": in_flight(tenant_id),
             "limit": get_settings().max_in_flight_per_tenant,
         },
+    )
+    return True
+
+
+def _model_breaker():
+    """The one breaker for the model provider, configured from settings."""
+    settings = get_settings()
+    return get_breaker(
+        "model",
+        threshold=settings.breaker_threshold,
+        cooldown_seconds=settings.breaker_cooldown_seconds,
+    )
+
+
+def _defer_if_provider_down(payload: dict, queue: str, document_id: uuid.UUID) -> bool:
+    """Put the message back, untouched, while the model provider is down.
+
+    Deferring rather than failing is the whole point. A failed handler leaves
+    the message to redeliver, which burns one of its three receives; an outage
+    lasting more than three receives would push every in-flight document into
+    the DLQ for the provider's sake rather than their own. Re-sending with a
+    delay costs the document nothing and its receive count stays where it was.
+
+    The delay is the breaker's remaining cooldown rather than a fixed number,
+    so the fleet comes back roughly when the provider does instead of drifting
+    further behind on every deferral.
+    """
+    breaker = _model_breaker()
+    if breaker.state != "open":
+        return False
+
+    _, broker = _clients()
+    delay = min(int(breaker.cooldown.total_seconds()), 900)
+    broker.send(queue, payload, delay_seconds=delay)
+    log.warning(
+        "deferred: model provider circuit is open",
+        extra={"document_id": str(document_id), "queue": queue, "retry_in_s": delay},
     )
     return True
 

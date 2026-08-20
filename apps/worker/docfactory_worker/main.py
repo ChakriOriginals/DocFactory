@@ -6,6 +6,7 @@ import threading
 
 from docfactory_core.bootstrap import ensure_infra
 from docfactory_core.config import get_settings
+from docfactory_core.healing import heal
 from docfactory_core.logging import configure_logging
 from docfactory_core.queues import QueueBroker
 from docfactory_core.tracing import setup_tracing
@@ -30,6 +31,14 @@ def main() -> None:
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
+    if settings.heal_interval_seconds > 0:
+        threading.Thread(
+            target=_healing_loop,
+            args=(stop, settings),
+            name="healer",
+            daemon=True,
+        ).start()
+
     consumers = (
         # Batch ingestion and the API upload path feed the same parse queue.
         Consumer(QueueBroker(), settings.ingest_queue, handle_ingest, stop),
@@ -48,6 +57,38 @@ def main() -> None:
     )
     for thread in threads:
         thread.join()
+
+
+def _healing_loop(stop: threading.Event, settings) -> None:
+    """Sweep for work the queue cannot recover on its own.
+
+    A daemon thread rather than a separate scheduled task: the sweep is cheap,
+    it needs exactly the credentials and network the worker already has, and a
+    fleet that scales to zero has nobody to run a cron. Every running worker
+    sweeps; the operations are idempotent, so overlapping sweeps cost duplicate
+    no-op receives and nothing else.
+
+    NOTHING HERE MAY KILL THE WORKER. A sweeper that crashes the process it
+    lives in has done more damage than the stranded documents it was looking
+    for — the 4e lesson, applied again.
+    """
+    from datetime import timedelta
+
+    from docfactory_core.queues import QueueBroker
+
+    broker = QueueBroker()
+    stale_after = timedelta(seconds=settings.heal_stale_after_seconds)
+
+    # Wait first. Starting a sweep in the same instant as the consumers means
+    # racing the documents they are about to pick up.
+    while not stop.wait(settings.heal_interval_seconds):
+        try:
+            summary = heal(broker, stale_after=stale_after)
+        except Exception:
+            log.exception("healing sweep failed; the worker continues")
+            continue
+        if any(summary.values()):
+            log.info("healing sweep", extra=summary)
 
 
 if __name__ == "__main__":
