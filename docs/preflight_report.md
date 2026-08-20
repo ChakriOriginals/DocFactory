@@ -94,9 +94,9 @@ Both ingest paths commit the `documents` row and *then* enqueue:
 
 ```python
 with session_scope() as session:
-    session.add(document)          # committed here
+    session.add(document)  # committed here
 ...
-app.state.broker.send(settings.parse_queue, ...)   # if this raises…
+app.state.broker.send(settings.parse_queue, ...)  # if this raises…
 ```
 
 If the send fails — SQS blip, credential expiry, network — the request returns
