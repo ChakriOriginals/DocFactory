@@ -163,6 +163,42 @@ def run_extraction(
     )
 
 
+_VALIDATORS: dict[tuple[str, int], "jsonschema.protocols.Validator"] = {}
+
+
+def _validator_for(definition: PipelineDefinition) -> "jsonschema.protocols.Validator":
+    """A compiled validator per pipeline definition, built once.
+
+    `jsonschema.validate()` is a convenience wrapper that calls `check_schema()`
+    on every single call — it re-validates the schema against its meta-schema
+    before it ever looks at the data. Profiling the extract path over 120
+    documents put 0.742s of 0.774s of total validation time inside
+    `check_schema`: 96% of the cost of validating records was spent re-proving
+    that the schema was still a schema.
+
+    Keyed on (slug, version) rather than on the definition object, and that is
+    the real identity rather than a hashability workaround: a definition is
+    immutable for a given slug and version by design — editing a pipeline
+    creates a new version, so documents in flight keep the definition they
+    started under.
+
+    `check_schema` still runs, once, when the validator is built, so an invalid
+    schema still raises at the first validation attempt exactly as before. A
+    plain dict rather than lru_cache because the schema arrives as an
+    unhashable dict on the definition; the worst race between threads is
+    building the same validator twice and keeping one.
+    """
+    key = (definition.slug, definition.version)
+    validator = _VALIDATORS.get(key)
+    if validator is None:
+        schema = definition.json_schema
+        validator_class = jsonschema.validators.validator_for(schema)
+        validator_class.check_schema(schema)
+        validator = validator_class(schema)
+        _VALIDATORS[key] = validator
+    return validator
+
+
 def validate_record(payload: object, definition: PipelineDefinition) -> dict:
     """Check the model's object against the pipeline schema, then canonicalize.
 
@@ -170,7 +206,7 @@ def validate_record(payload: object, definition: PipelineDefinition) -> dict:
     own terms: the shape is wrong (JSON Schema), or a value cannot be read as
     the kind its field declares ("31.02.2026" is not a date).
     """
-    jsonschema.validate(payload, definition.json_schema)
+    _validator_for(definition).validate(payload)
     return definition.normalize(payload)
 
 
