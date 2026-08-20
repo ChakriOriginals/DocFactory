@@ -30,7 +30,7 @@ services:
       # Only what the data-plane layer touches. A narrower list starts faster
       # and makes "service not available" an explicit result rather than a
       # mysterious timeout.
-      SERVICES: s3,sqs,secretsmanager,iam,sts,ecr
+      SERVICES: s3,sqs,secretsmanager,iam,sts,ecr,sns,cloudwatch
       # Queue URLs as http://localhost:4566/000000000000/<name>.
       #
       # The default ("standard") returns

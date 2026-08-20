@@ -144,6 +144,50 @@ probe "ECR repositories" -- \
   --query "repositories[?contains(repositoryName, '${PROJECT_TAG}')].repositoryName" \
   --output text
 
+# Added in 4f-B. These are cheap-to-free, but a stack that "no longer exists"
+# while its budget alarm still emails you is a stack you will not trust the
+# next time it says something.
+probe "CloudWatch alarms" -- \
+  aws cloudwatch describe-alarms --region "$REGION" \
+  --alarm-name-prefix "${PROJECT_TAG}" \
+  --query 'MetricAlarms[].AlarmName' --output text
+
+probe "composite alarms" -- \
+  aws cloudwatch describe-alarms --region "$REGION" --alarm-types CompositeAlarm \
+  --alarm-name-prefix "${PROJECT_TAG}" \
+  --query 'CompositeAlarms[].AlarmName' --output text
+
+# Billing alarms are always in us-east-1 whatever region the stack ran in, so
+# they survive a region-scoped sweep that looks correct.
+if [ "$REGION" != "us-east-1" ]; then
+  probe "billing alarms (us-east-1, where AWS/Billing always lives)" -- \
+    aws cloudwatch describe-alarms --region us-east-1 \
+    --alarm-name-prefix "${PROJECT_TAG}" \
+    --query 'MetricAlarms[].AlarmName' --output text
+fi
+
+probe "SNS topics" -- \
+  aws sns list-topics --region "$REGION" \
+  --query "Topics[?contains(TopicArn, '${PROJECT_TAG}')].TopicArn" --output text
+
+probe "autoscaling scalable targets" -- \
+  aws application-autoscaling describe-scalable-targets --region "$REGION" \
+  --service-namespace ecs \
+  --query "ScalableTargets[?contains(ResourceId, '${PROJECT_TAG}')].ResourceId" --output text
+
+probe "ALB target groups" -- \
+  aws elbv2 describe-target-groups --region "$REGION" \
+  --query "TargetGroups[?contains(TargetGroupName, '${PROJECT_TAG}')].TargetGroupArn" \
+  --output text
+
+# Budgets are global and free, and are the ONE thing that should arguably
+# survive a teardown — an account with no budget alarm is how the next project
+# surprises you. Reported as kept, never as an orphan.
+budgets=$(aws budgets describe-budgets --account-id "$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
+  --query "Budgets[?contains(BudgetName, '${PROJECT_TAG}')].BudgetName" --output text 2>/dev/null)
+echo "  kept    budgets (free, and worth keeping):"
+echo "${budgets:-  (none — consider leaving one in place)}" | sed 's/^/          /'
+
 # Secrets are the one thing where "still there" is usually correct: a deleted
 # secret with a recovery window keeps its NAME reserved, which breaks the next
 # apply. This stack sets recovery_window_in_days = 0 so they go immediately.

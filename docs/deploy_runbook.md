@@ -39,7 +39,8 @@ what is missing.
 
 | # | Prereq | Verify |
 |---|---|---|
-| 1.1 | AWS account with a budget alarm | `aws budgets describe-budgets --account-id "$(aws sts get-caller-identity --query Account --output text)"` |
+| 1.1 | AWS account with a budget alarm | Terraform creates it — see 1.1 below |
+| 1.1b | **Billing alerts enabled** (console-only) | see 1.1 below |
 | 1.2 | CLI authenticated | `aws sts get-caller-identity` |
 | 1.3 | Terraform ≥ 1.9 | `terraform version` |
 | 1.4 | Docker running | `docker info --format '{{.ServerVersion}}'` |
@@ -47,20 +48,49 @@ what is missing.
 | 1.6 | Neon project reachable | `psql "$NEON_OWNER_URL" -c 'select version()'` |
 | 1.7 | Neon app role exists, unprivileged | see 1.7 below |
 
-### 1.1 The budget alarm goes first
+### 1.1 The cost guard rails
 
-Before anything else. A budget you set after the bill is a receipt.
+The budget itself is **Terraform-managed** (`data-plane/cost_guard.tf`), so it
+exists from the first apply rather than depending on you remembering a console
+click. Set where the alerts go:
 
-Billing → Budgets → Create budget → Cost budget → monthly, **$10**, alerts at
-50% / 80% / 100% to your email. Then confirm the subscription email.
+```bash
+# in infra/terraform/data-plane/terraform.tfvars
+cost_alert_email   = "you@example.com"
+monthly_budget_usd = 10
+```
+
+Two things Terraform cannot do for you, both of which turn a guard rail into
+decoration if skipped:
+
+**1. Enable billing alerts.** `AWS/Billing` metrics are not published at all
+until *Billing → Billing preferences → Receive Billing Alerts* is ticked. There
+is no API and no Terraform resource for it. Until it is on, the
+`docfactory-dev-estimated-charges` alarm sits in `INSUFFICIENT_DATA`.
+
+**2. Confirm the SNS subscription.** AWS emails a confirmation link when the
+topic is created. An unconfirmed subscription is a silent alarm.
+
+Verify both after the data-plane apply:
 
 ```bash
 aws budgets describe-budgets \
   --account-id "$(aws sts get-caller-identity --query Account --output text)" \
   --query 'Budgets[].{Name:BudgetName,Limit:BudgetLimit.Amount}' --output table
+
+# PendingConfirmation must be "false"
+aws sns list-subscriptions-by-topic \
+  --topic-arn "$(cd "$TF_DATA" && terraform output -raw cost_alerts_topic_arn)" \
+  --query 'Subscriptions[].{Endpoint:Endpoint,Pending:PendingConfirmation}' --output table
+
+# INSUFFICIENT_DATA here means billing alerts are still off
+aws cloudwatch describe-alarms --region us-east-1 \
+  --alarm-names docfactory-dev-estimated-charges \
+  --query 'MetricAlarms[].{Name:AlarmName,State:StateValue}' --output table
 ```
 
-Empty output means you do not have one. Go back.
+At ~$36/month standing, a $10 budget breaches after about **8 days** — the
+alert arrives while a forgotten stack is still a rounding error.
 
 ### 1.2 CLI authentication
 
@@ -720,13 +750,21 @@ one pass, then remove it and add the specific grants. Never leave it attached.
 
 ## Cost summary
 
+Full breakdown in [cost_model.md](cost_model.md), which corrects the figure
+this table used to give: a standing stack is **~$36/month**, not "~$16, the
+ALB". The API task alone costs more than the load balancer.
+
 | Resource | Idle cost | Note |
 |---|---|---|
-| ALB | ~$16/mo | The price of a stable URL. Destroy the compute layer to stop it. |
-| Fargate — API | ~$9/mo at 1 task | Goes with the compute layer. |
+| ALB | **$16.43/mo** | The price of a stable URL. Destroy the compute layer to stop it. |
+| Fargate — API | **$18.02/mo** at 1 task (0.5 vCPU, 1 GB) | The largest single line. Goes with the compute layer. |
+| Secrets Manager | $1.20/mo | Three secrets at $0.40. Survives a compute destroy. |
+| CloudWatch composite alarm | $0.50/mo | Not in the free tier; the metric alarms are. |
 | Fargate — workers | **$0 idle** | `worker_min_count = 0`; they exist only under backlog. |
 | NAT gateway | ~$32/mo | **This stack creates none.** Tasks run in public subnets, closed by security groups. |
 | S3 / SQS / Secrets / ECR / logs | cents | Log retention capped at 7 days; untagged layers expire after 1. |
 | Neon | $0 | Scales to zero between demos. |
 
-Parked (compute destroyed, data plane kept): a few cents a month.
+Parked with `make aws-park` (tasks at 0, ALB standing): **~$18.33/mo**.
+Compute destroyed, data plane kept: **~$1.31/mo**. A three-hour demo brought up
+and destroyed the same evening: **$0.14**.

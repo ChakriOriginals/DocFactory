@@ -83,6 +83,39 @@ variable "anthropic_api_key" {
   default     = ""
 }
 
+# --- cost guard rails --------------------------------------------------------
+
+variable "monthly_budget_usd" {
+  description = <<-EOT
+    Monthly cost budget, in whole USD. Notifications fire at 50% and 100% of
+    actual spend and at a 100% forecast.
+
+    10 is chosen to be uncomfortable rather than generous: this stack's designed
+    idle cost is the ALB at roughly $16/month if it is left standing all month,
+    so a $10 budget breaches BEFORE a forgotten stack completes its first full
+    month. A budget you never hit teaches you nothing.
+  EOT
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.monthly_budget_usd > 0
+    error_message = "monthly_budget_usd must be positive."
+  }
+}
+
+variable "cost_alert_email" {
+  description = <<-EOT
+    Where budget and billing alarms go. Empty creates the SNS topic and the
+    budget without a subscriber — the alarms still fire, nobody hears them.
+
+    AWS sends a confirmation email; an unconfirmed subscription is a silent
+    alarm. Confirm it, then verify with the command in the runbook's prereqs.
+  EOT
+  type        = string
+  default     = ""
+}
+
 # --- CI ---------------------------------------------------------------------
 
 variable "github_repository" {

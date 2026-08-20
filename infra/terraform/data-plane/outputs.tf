@@ -90,3 +90,8 @@ output "github_deploy_role_arn" {
   description = "Set as the AWS_DEPLOY_ROLE_ARN repository variable in GitHub."
   value       = local.enable_oidc ? aws_iam_role.github_deploy[0].arn : "(github_repository not set)"
 }
+
+output "cost_alerts_topic_arn" {
+  description = "Budget and billing-alarm notifications. Confirm the email subscription."
+  value       = aws_sns_topic.cost_alerts.arn
+}

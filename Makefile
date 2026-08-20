@@ -5,9 +5,14 @@ LS_VARS := -var-file=../../localstack/data-plane.tfvars
 
 # ECR is a LocalStack Pro service; Community answers ecr:CreateRepository with
 # HTTP 501. The CI deploy role's inline policy references the repository ARNs,
-# so it cannot be applied either. Everything else in the layer is applied for
-# real — see infra/localstack/README.md for exactly what that does and does not
-# prove.
+# so it cannot be applied either. The 4f-B cost guard rails are excluded too:
+# LocalStack Community has no Budgets API at all, and its SNS rejects the
+# provider's dummy credentials with InvalidClientTokenId — an emulator quirk,
+# not a configuration error, since the same credentials create S3, SQS, IAM and
+# Secrets Manager resources in the same apply. Those two are covered by
+# `terraform plan` instead; see docs/cost_model.md.
+# Everything else in the layer is applied for real — see
+# infra/localstack/README.md for exactly what that does and does not prove.
 LS_TARGETS := \
 	-target=aws_s3_bucket_notification.documents \
 	-target=aws_s3_bucket_public_access_block.documents \
@@ -24,6 +29,7 @@ LS_TARGETS := \
 	-target='aws_iam_role.github_deploy[0]'
 
 .PHONY: setup up down seed test lint fmt eval eval-gate costs migrate calibrate calibrate-fit drift-experiment \
+	aws-park aws-unpark aws-cost \
 	localstack-up localstack-down localstack-apply localstack-verify localstack-destroy localstack-cycle
 
 .env:
@@ -100,6 +106,41 @@ eval-gate: .env
 
 migrate: .env
 	uv run alembic upgrade head
+
+# --- cost control on a deployed stack (4f-B) --------------------------------
+#
+# The on-demand version of the dead man's switch. Scales every service to zero
+# without touching the infrastructure, so the stack comes back with `make
+# aws-unpark` in seconds rather than a full apply.
+#
+# This does NOT stop the ALB, which is most of the idle cost. Only destroying
+# the compute layer does that:  cd infra/terraform/compute-plane && terraform destroy
+# See docs/cost_model.md for what each option actually saves.
+CLUSTER ?= docfactory-dev
+
+aws-park:
+	@echo "Scaling $(CLUSTER) services to zero (the ALB keeps billing — destroy to stop it)."
+	aws ecs update-service --cluster $(CLUSTER) --service $(CLUSTER)-api --desired-count 0 >/dev/null
+	aws ecs update-service --cluster $(CLUSTER) --service $(CLUSTER)-worker --desired-count 0 >/dev/null
+	aws application-autoscaling register-scalable-target \
+		--service-namespace ecs --scalable-dimension ecs:service:DesiredCount \
+		--resource-id service/$(CLUSTER)/$(CLUSTER)-worker --min-capacity 0 --max-capacity 0
+	@echo "Parked. Run 'make aws-unpark' to bring it back."
+
+aws-unpark:
+	aws application-autoscaling register-scalable-target \
+		--service-namespace ecs --scalable-dimension ecs:service:DesiredCount \
+		--resource-id service/$(CLUSTER)/$(CLUSTER)-worker --min-capacity 0 --max-capacity 6
+	aws ecs update-service --cluster $(CLUSTER) --service $(CLUSTER)-api --desired-count 1 >/dev/null
+	@echo "Unparked. Workers stay at zero until the backlog alarm needs them."
+
+## What is billing right now, per service, month to date.
+aws-cost:
+	aws ce get-cost-and-usage --time-period Start=$$(date -u +%Y-%m-01),End=$$(date -u +%Y-%m-%d) \
+		--granularity MONTHLY --metrics UnblendedCost \
+		--group-by Type=DIMENSION,Key=SERVICE \
+		--query 'ResultsByTime[0].Groups[?Metrics.UnblendedCost.Amount>`0.001`].[Keys[0],Metrics.UnblendedCost.Amount]' \
+		--output table
 
 # --- LocalStack validation of the data plane (4c.5b) ------------------------
 #

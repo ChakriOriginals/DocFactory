@@ -36,8 +36,9 @@ output "queue_urls" {
 output "teardown_reminder" {
   description = "What still costs money, and what destroying THIS layer does."
   value = join(" ", [
-    "Idle cost is the ALB (~$16/mo) plus any running Fargate tasks;",
-    "there is no NAT gateway by design.",
+    "Standing cost is ~$36/mo: the ALB (~$16.43) plus the always-on API task",
+    "(~$18.02) plus ~$1.90 of secrets, alarms and images. Workers are $0 idle,",
+    "and there is no NAT gateway by design. See docs/cost_model.md.",
     "`terraform destroy` HERE removes both and keeps the bucket, queues,",
     "secrets and images intact — that is the overnight park.",
     "Then run scripts/aws_orphan_check.sh to confirm nothing survived.",

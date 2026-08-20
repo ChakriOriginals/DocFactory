@@ -59,6 +59,26 @@ variable "task_memory" {
   default     = 1024
 }
 
+variable "idle_park_hours" {
+  description = <<-EOT
+    Hours of continuously-running worker tasks before the dead man's switch
+    parks the fleet.
+
+    3 is chosen against the shape of this stack's work: a demo batch drains in
+    minutes, and the 4e experiment's 125 documents take well under an hour, so
+    three hours of continuous running means something is wrong rather than
+    something is busy. Raise it if a real backlog ever legitimately runs longer
+    — the cost of it firing early is a sixty-second blip, not lost work.
+  EOT
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.idle_park_hours >= 1
+    error_message = "idle_park_hours must be at least 1 (the alarm period is one hour)."
+  }
+}
+
 variable "log_retention_days" {
   description = "CloudWatch log retention. Log groups are a silent forever-cost without it."
   type        = number

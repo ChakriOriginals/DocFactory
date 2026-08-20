@@ -37,7 +37,7 @@ That direction buys three things:
    second, after the cheap one is proven.
 3. **A blast radius you can state.** The data layer holds everything with a
    lifetime longer than a deploy. The compute layer holds everything that is
-   disposable by design.
+   disposable by design — and, per `docs/cost_model.md`, **96% of the cost**.
 
 Order is: apply data, apply compute; destroy compute, destroy data. Destroying
 the data layer while compute is up is not a supported operation, and Terraform
@@ -131,7 +131,7 @@ permissions.
 | | data-plane | compute-plane |
 |---|---|---|
 | Holds | bucket, queues, secrets, registries, IAM | VPC, ALB, ECS, autoscaling, log groups |
-| Idle cost | cents | ~$16/mo ALB + Fargate time |
+| Idle cost | ~$1.31/mo (mostly Secrets Manager) | ~$34.45/mo — ALB $16.43 + always-on API task $18.02 |
 | Safe to destroy alone | no (compute depends on it) | **yes — this is the overnight park** |
 | Applied against LocalStack | yes, 28/33 resources | no (not emulated) |
 | Survives its own destroy | the documents bucket, by design | nothing |
