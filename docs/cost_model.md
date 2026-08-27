@@ -13,10 +13,10 @@ here is what $100 buys:
 
 | state | $/month | months on $100 |
 |---|---:|---:|
-| running 24/7 | **$14.47** | **7** |
-| running 24/7 with `enable_alb = true` | $30.90 | 3 |
-| parked (`make aws-park`) | $1.81 | 55 |
-| compute destroyed, data plane kept | $1.31 | 76 |
+| running 24/7 | **$13.27** | **7.5** |
+| running 24/7 with `enable_alb = true` | $29.70 | 3.4 |
+| parked (`make aws-park`) | **$0.61** | 164 |
+| compute destroyed, data plane kept | **$0.11** | 900+ |
 | both layers destroyed | $0.01 | — |
 
 A three-hour demo brought up and destroyed the same evening costs **$0.05** in
@@ -35,8 +35,8 @@ task hours. At that rate the credits outlast the degree.
 > **"Compute destroyed" was quoted as $0.11 and is $1.31.** Secrets Manager
 > lives in the *data* plane and survives a compute-plane destroy, so its $1.20
 > stays. The $0.11 figure is what you get after destroying *both* layers — or
-> after the SSM Parameter Store swap described at the end of this document,
-> which is now 92% of the resting cost rather than two thirds.
+> after the SSM Parameter Store swap, **which has since been done** — the
+> figures in the table above already reflect it.
 
 **The one thing that could actually burn them.** Six workers pinned at maximum
 around the clock is ~$119/month on-demand — the whole balance in under a month.
@@ -105,16 +105,18 @@ destroy the compute layer when the demo is over.
 
 | resource | rate | idle |
 |---|---|---|
-| **Secrets Manager** | $0.40/secret-mo | **$1.20/mo** for three secrets |
+| **SSM Parameter Store** | Standard parameters are **free** | **$0.00** for three SecureStrings |
 | **ECR storage** | $0.10/GB-mo | ~$0.10/mo, untagged layers expire after 1 day |
 | **S3 storage** | $0.023/GB-mo | ~$0.01/mo for a demo corpus |
 | **S3 / SQS requests** | $0.005/1k PUT, $0.40/M SQS | inside the free tier at demo volume |
 | **AWS Budgets** | first 2 free | **$0.00** |
 | **SNS email** | first 1,000 free | **$0.00** |
 
-Secrets Manager at $1.20/month is the one line that is not "pennies" — it is
-most of the cost of a fully parked stack, and it is the reason the
-compute-destroyed state is $1.31 rather than $0.10.
+Nothing in the data layer is now more than pennies. It used to be: Secrets
+Manager at $1.20/month was most of the cost of a parked stack, which is what
+the swap to SSM Parameter Store removed — three SecureString parameters,
+encrypted with the same KMS machinery, read by ECS through the same
+`valueFrom` field, at zero.
 
 ### Deliberately zero
 
@@ -186,27 +188,42 @@ error, not after a full month.
 The budget and the SNS topic could not be applied against LocalStack:
 Community has no Budgets API at all, and its SNS rejects the provider's dummy
 credentials with `InvalidClientTokenId` while accepting the same credentials
-for S3, SQS, IAM and Secrets Manager in the same apply — an emulator quirk
+for S3, SQS, IAM and SSM in the same apply — an emulator quirk
 rather than a configuration error. `plan` is the verification those two get
 until the first real apply.
 
 
 ---
 
-## Still on the list
+## Done: Secrets Manager to SSM Parameter Store
 
-**Secrets Manager → SSM Parameter Store.** $1.20/month, which is two thirds of
-the parked cost and the largest recurring line left after the ALB and the API
-task were dealt with. Standard SSM parameters are free, hold SecureString
-values, and ECS task definitions read them through the same `valueFrom` field —
-the change is a swap in `secrets.tf`, the execution-role policy moving from
-`secretsmanager:GetSecretValue` to `ssm:GetParameters` plus a `kms:Decrypt`
-scoped by `kms:ViaService`, and updates to the IAM pre-flight table.
+Three secrets at $0.40/month were $1.20 — which was 92% of what this stack cost
+once the compute layer was destroyed. SSM Parameter Store Standard parameters
+are free, hold SecureString values encrypted with KMS exactly as Secrets
+Manager does, and ECS reads them through the same `valueFrom` field. The task
+definitions did not change shape at all.
 
-Deliberately not done in the same pass as the ALB and sizing changes: it
-touches the credential path that Phases 4c.5 and 4d spent real effort getting
-right, and there is currently no `terraform` on this machine to validate it
-with. A $14/year saving is not worth breaking secret delivery on the first
-apply. It should be done, with `validate` and a LocalStack apply behind it —
-SSM is one of the services LocalStack Community does support, so it can be
-tested properly.
+What Secrets Manager offered that this does not: automatic rotation,
+cross-account sharing, versioned staging labels. This project used none of the
+three. Paying $14/year for features nobody calls is a subscription, not a
+security posture.
+
+Two things fell out of it that were not the point but are worth having:
+
+- **A failure mode disappeared.** Secrets Manager reserves a deleted secret's
+  name for a recovery window, so destroy-then-apply used to fail with "a secret
+  with this name is scheduled for deletion". That is why the old resources
+  carried `recovery_window_in_days = 0` and why the orphan check probed for
+  pending deletions. Parameters delete immediately; the whole class is gone
+  rather than worked around.
+- **It is testable.** LocalStack Community implements SSM and KMS, which it
+  never did for the Budgets API. The three parameters are created, read back
+  *with decryption* — the way ECS reads them — and checked for Standard tier in
+  `make localstack-verify`.
+
+The execution role moved from `secretsmanager:GetSecretValue` on three secret
+ARNs to `ssm:GetParameters` on three parameter ARNs, plus `kms:Decrypt`
+constrained by `kms:ViaService` to SSM in this region. Two details worth
+knowing: ECS calls the **plural** `GetParameters` even for one parameter, and
+a SecureString needs the KMS grant as well as the SSM one — miss either and
+the task starts, fails, and points you at the wrong service.

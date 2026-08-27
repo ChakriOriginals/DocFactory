@@ -6,7 +6,7 @@ the reasoning; the procedure lives in
 
 ```
 infra/terraform/
-  data-plane/      S3 + notifications, SQS + DLQs, Secrets Manager, ECR, IAM
+  data-plane/      S3 + notifications, SQS + DLQs, SSM parameters, ECR, IAM
   compute-plane/   VPC, ALB, ECS Fargate (api/worker/migrate), autoscaling
 ```
 
@@ -65,7 +65,7 @@ way a small AWS project quietly costs real money. Fargate tasks run in *public*
 subnets with public IPs and are kept private by security groups instead:
 nothing may reach a task except the ALB, on one port, and the worker accepts no
 inbound traffic at all. The conventional alternative — private subnets plus
-interface VPC endpoints for ECR/SQS/Secrets Manager/Logs — is ~$7/month per
+interface VPC endpoints for ECR/SQS/SSM/Logs — is ~$7/month per
 endpoint per AZ and costs *more* than the NAT it replaces. The S3 *gateway*
 endpoint is free and is included, so bucket traffic stays inside the VPC.
 
@@ -93,7 +93,7 @@ running `destroy` still refuses — you must `apply` first.)
 
 **Secrets are never task-definition environment variables.** Those are visible
 to anyone who can call `DescribeTaskDefinition`. The task pulls them at runtime
-from Secrets Manager, and the *execution* role's permission to read them is
+from SSM Parameter Store, and the *execution* role's permission to read them is
 scoped to exactly three ARNs. `recovery_window_in_days = 0` so a destroyed
 secret does not keep its name reserved and break the next apply.
 
@@ -131,7 +131,7 @@ permissions.
 | | data-plane | compute-plane |
 |---|---|---|
 | Holds | bucket, queues, secrets, registries, IAM | VPC, ALB, ECS, autoscaling, log groups |
-| Idle cost | ~$1.31/mo (mostly Secrets Manager) | **~$9.62/mo** — one 256/512 API task; no ALB by default |
+| Idle cost | **~$0.11/mo** (images and bucket) | **~$13.27/mo** — one 256/512 API task + its public IPv4; no ALB by default |
 | Safe to destroy alone | no (compute depends on it) | **yes — this is the overnight park** |
 | Applied against LocalStack | yes, 28/33 resources | no (not emulated) |
 | Survives its own destroy | the documents bucket, by design | nothing |

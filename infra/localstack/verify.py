@@ -96,7 +96,7 @@ def clients(endpoint: str):
     return (
         boto3.client("s3", config=cfg, **common),
         boto3.client("sqs", **common),
-        boto3.client("secretsmanager", **common),
+        boto3.client("ssm", **common),
         boto3.client("iam", **common),
     )
 
@@ -230,19 +230,49 @@ def check_ingest_queue_policy(rep: Report, sqs, out: dict) -> None:
     )
 
 
-def check_secrets(rep: Report, sm, out: dict) -> None:
-    for key, arn in sorted(out["secret_arns"].items()):
+def check_secrets(rep: Report, ssm, out: dict) -> None:
+    """The three SecureString parameters the task definitions point at.
+
+    Read WITH DECRYPTION, because that is what ECS does. A parameter that
+    exists but cannot be decrypted is a task that starts and dies, and a check
+    that skipped decryption could not tell the two apart.
+    """
+    names = {key: arn.split(":parameter", 1)[1] for key, arn in out["parameter_arns"].items()}
+
+    for key, name in sorted(names.items()):
         try:
-            value = sm.get_secret_value(SecretId=arn)["SecretString"]
-            rep.check(f"secret readable ({key})", bool(value), f"{len(value)} chars")
+            value = ssm.get_parameter(Name=name, WithDecryption=True)["Parameter"]["Value"]
+            rep.check(f"parameter readable ({key})", bool(value), f"{len(value)} chars")
         except Exception as exc:
-            rep.fail(f"secret readable ({key})", str(exc))
+            rep.fail(f"parameter readable ({key})", str(exc))
+
+    # Standard tier is the entire reason for moving off Secrets Manager.
+    # Advanced parameters are $0.05 each per month and would quietly undo it.
+    for key, name in sorted(names.items()):
+        try:
+            found = ssm.describe_parameters(ParameterFilters=[{"Key": "Name", "Values": [name]}])[
+                "Parameters"
+            ]
+            if not found:
+                rep.fail(f"parameter tier ({key})", "not returned by describe_parameters")
+                continue
+            entry = found[0]
+            tier, ptype = entry.get("Tier", "Standard"), entry.get("Type")
+            rep.check(
+                f"parameter is free Standard SecureString ({key})",
+                tier == "Standard" and ptype == "SecureString",
+                f"tier={tier}, type={ptype}",
+            )
+        except Exception as exc:
+            rep.unsupported_by_localstack(
+                f"parameter tier ({key})", f"describe_parameters unavailable: {exc}"
+            )
 
 
 def check_iam(rep: Report, iam, out: dict) -> None:
     """IAM as OBJECTS. LocalStack does not enforce them; see the module docstring."""
     expected_inline = {
-        "docfactory-dev-task-execution": "read-stack-secrets",
+        "docfactory-dev-task-execution": "read-stack-parameters",
         "docfactory-dev-api-task": "api-data-plane",
         "docfactory-dev-worker-task": "worker-data-plane",
     }
@@ -583,7 +613,7 @@ def main() -> int:
     raw = json.loads(args.outputs.read_text())
     out = {key: entry["value"] for key, entry in raw.items()}
 
-    s3, sqs, sm, iam = clients(args.endpoint)
+    s3, sqs, ssm, iam = clients(args.endpoint)
     rep = Report()
 
     print(f"\nVerifying the applied data plane in LocalStack at {args.endpoint}\n")
@@ -591,7 +621,7 @@ def main() -> int:
     check_notification(rep, s3, out)
     check_queues(rep, sqs, out)
     check_ingest_queue_policy(rep, sqs, out)
-    check_secrets(rep, sm, out)
+    check_secrets(rep, ssm, out)
     check_iam(rep, iam, out)
     check_notification_delivers(rep, s3, sqs, out)
     check_redrive_behaviour(rep, sqs, out)

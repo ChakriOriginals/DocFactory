@@ -75,8 +75,8 @@ locals {
   ]
 
   common_secrets = [
-    { name = "DATABASE_URL", valueFrom = local.data_plane.secret_arns.database_url_app },
-    { name = "ANTHROPIC_API_KEY", valueFrom = local.data_plane.secret_arns.anthropic_api_key },
+    { name = "DATABASE_URL", valueFrom = local.data_plane.parameter_arns.database_url_app },
+    { name = "ANTHROPIC_API_KEY", valueFrom = local.data_plane.parameter_arns.anthropic_api_key },
   ]
 }
 
@@ -87,10 +87,10 @@ resource "aws_ecs_task_definition" "api" {
   # The only task that runs on an idle stack, so the only one whose size shows
   # up on a monthly bill. 256/512 is the Fargate floor and is what the API
   # needs: hash an upload, put it in S3, insert a row, enqueue a message.
-  cpu    = var.api_cpu
-  memory = var.api_memory
-  execution_role_arn       = local.data_plane.task_execution_role_arn
-  task_role_arn            = local.data_plane.api_task_role_arn
+  cpu                = var.api_cpu
+  memory             = var.api_memory
+  execution_role_arn = local.data_plane.task_execution_role_arn
+  task_role_arn      = local.data_plane.api_task_role_arn
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -132,10 +132,10 @@ resource "aws_ecs_task_definition" "worker" {
   # Deliberately NOT shrunk with the API: workers are at zero when idle, so
   # their size costs nothing on a parked stack and only decides how fast a
   # burst drains. PDF parsing is the one genuinely CPU-hungry stage.
-  cpu    = var.worker_cpu
-  memory = var.worker_memory
-  execution_role_arn       = local.data_plane.task_execution_role_arn
-  task_role_arn            = local.data_plane.worker_task_role_arn
+  cpu                = var.worker_cpu
+  memory             = var.worker_memory
+  execution_role_arn = local.data_plane.task_execution_role_arn
+  task_role_arn      = local.data_plane.worker_task_role_arn
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -167,10 +167,10 @@ resource "aws_ecs_task_definition" "migrate" {
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   # Runs for seconds, once per deploy. Its size is a rounding error either way.
-  cpu    = var.worker_cpu
-  memory = var.worker_memory
-  execution_role_arn       = local.data_plane.task_execution_role_arn
-  task_role_arn            = local.data_plane.api_task_role_arn
+  cpu                = var.worker_cpu
+  memory             = var.worker_memory
+  execution_role_arn = local.data_plane.task_execution_role_arn
+  task_role_arn      = local.data_plane.api_task_role_arn
 
   runtime_platform {
     operating_system_family = "LINUX"
@@ -186,8 +186,8 @@ resource "aws_ecs_task_definition" "migrate" {
     environment = local.common_environment
     secrets = [
       # Alembic connects as the owner; the app role must never hold DDL rights.
-      { name = "DATABASE_ADMIN_URL", valueFrom = local.data_plane.secret_arns.database_url_owner },
-      { name = "DATABASE_URL", valueFrom = local.data_plane.secret_arns.database_url_app },
+      { name = "DATABASE_ADMIN_URL", valueFrom = local.data_plane.parameter_arns.database_url_owner },
+      { name = "DATABASE_URL", valueFrom = local.data_plane.parameter_arns.database_url_app },
     ]
 
     logConfiguration = {
@@ -211,7 +211,7 @@ resource "aws_ecs_service" "api" {
   network_configuration {
     subnets = aws_subnet.public[*].id
     # No NAT gateway in this stack, so the task needs a public IP to reach ECR,
-    # Secrets Manager, SQS and Neon. Inbound is closed by the security group.
+    # SSM Parameter Store, SQS and Neon. Inbound is closed by the security group.
     assign_public_ip = true
     security_groups  = [aws_security_group.api.id]
   }

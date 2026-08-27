@@ -89,7 +89,7 @@ aws cloudwatch describe-alarms --region us-east-1 \
   --query 'MetricAlarms[].{Name:AlarmName,State:StateValue}' --output table
 ```
 
-At ~$14.47/month standing, a $10 budget breaches after about **21 days**. If
+At ~$13.27/month standing, a $10 budget breaches after about **23 days**. If
 you are on a promotional-credit account, the budget that matters more is
 `docfactory-dev-out-of-pocket`: it counts spend with credits EXCLUDED, so it
 reads $0.00 while the balance holds and alerts on the first cent of real money.
@@ -148,7 +148,7 @@ export TF_VAR_neon_database_url_owner='postgresql+psycopg://owner:...@...neon.te
 export TF_VAR_neon_database_url_app='postgresql+psycopg://docfactory_app:...@...neon.tech/docfactory'
 ```
 
-They go into Secrets Manager at apply time and are never written to a file in
+They go into SSM Parameter Store at apply time and are never written to a file in
 the repo.
 
 ### 1.8 Model API key
@@ -530,8 +530,8 @@ Mock is the deployed default and the stack should sit there. Do this once, for
 an honest cloud latency and cost number, and put it back.
 
 ```bash
-aws secretsmanager put-secret-value \
-  --secret-id docfactory-dev/anthropic-api-key --secret-string "$REAL_KEY"
+aws ssm put-parameter --overwrite \
+  --name /docfactory-dev/anthropic-api-key --type SecureString --value "$REAL_KEY"
 
 cd "$TF_COMPUTE"
 terraform apply -var model_provider=anthropic   # rolls both task definitions
@@ -617,7 +617,7 @@ Console verification, in the order things hurt:
 | Elastic IPs | EC2 → Elastic IPs | none unattached (~$3.60/mo each) |
 | Running tasks | ECS → Clusters → Tasks | none |
 | Log groups | CloudWatch → Log groups | none under `/ecs/docfactory` |
-| Secrets pending deletion | Secrets Manager (show disabled) | none — `recovery_window_in_days = 0`, and a pending name blocks the next apply |
+| SSM parameters | Systems Manager → Parameter Store | none under `/docfactory-dev` — they delete immediately, with no recovery window to block the next apply |
 | ECR repositories | ECR | none named `docfactory` |
 | S3 bucket | S3 | **kept on purpose** unless you forced it |
 
@@ -656,7 +656,8 @@ Not on the task roles, and correctly so:
 
 | Concern | Who holds it | Note |
 |---|---|---|
-| `secretsmanager:GetSecretValue` on 3 secret ARNs | **execution** role | ECS reads the secrets and injects them; the app never calls Secrets Manager |
+| `ssm:GetParameters` on 3 parameter ARNs | **execution** role | ECS reads them and injects them; the app never calls SSM. Note the **plural** — ECS calls `GetParameters` even for one parameter, and granting only `GetParameter` is a task that dies on AccessDenied |
+| `kms:Decrypt`, condition `kms:ViaService = ssm.<region>.amazonaws.com` | **execution** role | SecureString parameters are KMS-encrypted; without this the task fails with a KMS error rather than an SSM one, which sends you looking in the wrong service. Resource is `*` because the AWS-managed key's ARN does not exist until the account's first SecureString creates it; the condition is what scopes it |
 | ECR pull, CloudWatch Logs write | **execution** role | via `AmazonECSTaskExecutionRolePolicy` |
 | `kms:Decrypt` | nobody | secrets use the AWS-managed key, which grants via `kms:ViaService`; S3 uses SSE-S3 (AES256), not KMS |
 | `sts:GetCallerIdentity` | Terraform's own principal | no application code calls STS |
@@ -757,17 +758,18 @@ one pass, then remove it and add the specific grants. Never leave it attached.
 
 Full breakdown in [cost_model.md](cost_model.md). The defaults changed in
 `7b7c4f1` for a credit-funded account: no load balancer, a 256/512 API task,
-workers on Spot. A standing stack is **~$14.47/month**, down from ~$36.
+workers on Spot, and SSM Parameter Store instead of Secrets Manager. A standing
+stack is **~$13.27/month**, down from ~$36; parked is $0.61.
 
 | Resource | Idle cost | Note |
 |---|---|---|
 | Fargate — API | **$9.01/mo** at 1 task (256 CPU units, 512 MiB) | The largest line, and the only task that runs when idle. |
 | Public IPv4 | **$3.65/mo** while a task runs | $0.005/hr per in-use address since Feb 2024. Unavoidable with no NAT gateway; charged per task-hour, so parking removes it. |
 | ALB | **$0** by default | `enable_alb = false`; the task's public IP is the endpoint (`make api-url`). Turn it on for ~$16.43/mo when you need a stable hostname. |
-| Secrets Manager | $1.20/mo | Three secrets at $0.40. Survives a compute destroy; the largest remaining removal candidate. |
+| SSM Parameter Store | **$0.00** | Three SecureString parameters, Standard tier. Replaced Secrets Manager's $1.20/mo. |
 | CloudWatch composite alarm | $0.50/mo | Not in the free tier; the metric alarms are. |
 | Fargate — workers | **$0** idle | Zero when idle, and on Spot (~70% off) when not. |
 
-Parked with `make aws-park` (all tasks at 0): **~$1.81/mo**. Compute destroyed,
-data plane kept: **~$1.31/mo** — Secrets Manager is $1.20 of that and survives.
-A three-hour demo brought up and destroyed the same evening: **$0.05**.
+Parked with `make aws-park` (all tasks at 0): **~$0.61/mo**. Compute destroyed,
+data plane kept: **~$0.11/mo**. A three-hour demo brought up and destroyed the
+same evening: **$0.05**.

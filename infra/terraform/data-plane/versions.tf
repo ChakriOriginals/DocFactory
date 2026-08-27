@@ -50,12 +50,13 @@ provider "aws" {
     for_each = local.localstack ? [var.localstack_endpoint] : []
 
     content {
-      ecr            = endpoints.value
-      iam            = endpoints.value
-      s3             = endpoints.value
-      secretsmanager = endpoints.value
-      sqs            = endpoints.value
-      sts            = endpoints.value
+      ecr = endpoints.value
+      iam = endpoints.value
+      s3  = endpoints.value
+      kms = endpoints.value
+      ssm = endpoints.value
+      sqs = endpoints.value
+      sts = endpoints.value
     }
   }
 

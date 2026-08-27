@@ -9,7 +9,7 @@ LS_VARS := -var-file=../../localstack/data-plane.tfvars
 # LocalStack Community has no Budgets API at all, and its SNS rejects the
 # provider's dummy credentials with InvalidClientTokenId — an emulator quirk,
 # not a configuration error, since the same credentials create S3, SQS, IAM and
-# Secrets Manager resources in the same apply. Those two are covered by
+# SSM and Secrets Manager resources in the same apply. Those two are covered by
 # `terraform plan` instead; see docs/cost_model.md.
 # Everything else in the layer is applied for real — see
 # infra/localstack/README.md for exactly what that does and does not prove.
@@ -22,9 +22,9 @@ LS_TARGETS := \
 	-target=aws_iam_role_policy.worker_task \
 	-target=aws_iam_role_policy.task_execution_secrets \
 	-target=aws_iam_role_policy_attachment.task_execution \
-	-target=aws_secretsmanager_secret_version.database_url_app \
-	-target=aws_secretsmanager_secret_version.database_url_owner \
-	-target=aws_secretsmanager_secret_version.anthropic_api_key \
+	-target=aws_ssm_parameter.database_url_app \
+	-target=aws_ssm_parameter.database_url_owner \
+	-target=aws_ssm_parameter.anthropic_api_key \
 	-target='aws_iam_openid_connect_provider.github[0]' \
 	-target='aws_iam_role.github_deploy[0]'
 

@@ -29,7 +29,7 @@ COMPUTE_PLANE = TERRAFORM / "compute-plane"
 DATA_PLANE_TYPES = (
     "aws_s3_bucket",
     "aws_sqs_queue",
-    "aws_secretsmanager_secret",
+    "aws_ssm_parameter",
     "aws_ecr_repository",
     "aws_iam_role",
     "aws_iam_policy",
@@ -127,3 +127,70 @@ def test_the_localstack_var_file_is_not_auto_loaded():
     assert (localstack_dir / "data-plane.tfvars").exists()
     assert not list(DATA_PLANE.glob("*.auto.tfvars"))
     assert not list(COMPUTE_PLANE.glob("*.auto.tfvars"))
+
+
+# AWS's own character class for security-group and rule descriptions. Several
+# other resources use the same or a narrower set; an em-dash is outside all of
+# them.
+_AWS_SAFE = re.compile(r"^[0-9A-Za-z_ .:/()#,@\[\]+=&;{}!$*\-]*$")
+
+# Arguments whose value AWS validates the characters of.
+_VALIDATED_ARGUMENTS = ("description", "name", "alarm_name", "alarm_description", "sid")
+
+# Only these block types send their arguments to AWS. `output` and `variable`
+# descriptions are local metadata that never leaves the state file, which is
+# why they are free to contain apostrophes, backticks and prose — an earlier
+# version of this test flagged four of them and was wrong to.
+_AWS_FACING_BLOCKS = ("resource", "data")
+
+
+def _aws_facing_blocks(text: str) -> list[str]:
+    """The text of every top-level resource/data block in a .tf file."""
+    blocks, current, keep = [], [], False
+    for line in text.splitlines():
+        if re.match(r"^[a-z_]+\s", line) or re.match(r"^[a-z_]+$", line):
+            if keep and current:
+                blocks.append("\n".join(current))
+            keep = line.split(None, 1)[0] in _AWS_FACING_BLOCKS
+            current = [line] if keep else []
+        elif keep:
+            current.append(line)
+    if keep and current:
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def test_no_aws_facing_string_contains_a_character_aws_rejects():
+    """An em-dash in a security-group description fails the apply, not the plan.
+
+    Found the hard way: `network.tf` carried "No inbound at all — they poll"
+    from Phase 4c, and every check up to this point missed it.
+    `terraform validate` does not inspect string contents, and LocalStack
+    Community has no EC2, so the one tool that would have caught it could not
+    run. It surfaced only when a plan reached the provider's client-side
+    validation of an *ingress rule* description — the security group's own
+    description would have waited for the real apply.
+
+    Scoped to `resource` and `data` blocks. Output and variable descriptions
+    never reach AWS, and the prose in them is worth more than ASCII purity.
+    """
+    offenders: list[str] = []
+    pattern = re.compile(
+        rf"^\s*({'|'.join(_VALIDATED_ARGUMENTS)})\s*=\s*\"([^\"]*)\"\s*$", re.MULTILINE
+    )
+    for directory in (DATA_PLANE, COMPUTE_PLANE):
+        for path in sorted(directory.glob("*.tf")):
+            for block in _aws_facing_blocks(path.read_text()):
+                for argument, value in pattern.findall(block):
+                    # Interpolations resolve at apply time; only the literal
+                    # parts are ours to police.
+                    literal = re.sub(r"\$\{[^}]*\}", "", value)
+                    if not _AWS_SAFE.match(literal):
+                        bad = sorted({c for c in literal if not _AWS_SAFE.match(c)})
+                        offenders.append(f"{path.name}: {argument} = {value!r} contains {bad}")
+
+    assert not offenders, (
+        "AWS rejects these characters in validated string arguments:\n  "
+        + "\n  ".join(offenders)
+        + "\nUse ASCII in the value; keep the prose in the comment above it."
+    )

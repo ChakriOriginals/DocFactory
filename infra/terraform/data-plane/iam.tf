@@ -51,19 +51,49 @@ resource "aws_iam_role_policy_attachment" "task_execution" {
 
 data "aws_iam_policy_document" "read_secrets" {
   statement {
+    sid = "ReadStackParameters"
+    # ECS calls the PLURAL form when resolving a task definition's `secrets`
+    # block, even for a single parameter. Granting only ssm:GetParameter is a
+    # task that starts and dies with AccessDeniedException on GetParameters,
+    # which is a confusing thing to debug because the singular is the one you
+    # reach for by hand.
     effect  = "Allow"
-    actions = ["secretsmanager:GetSecretValue"]
-    # Exactly this stack's secrets, by ARN. Not secretsmanager:* on "*".
+    actions = ["ssm:GetParameters"]
+    # Exactly this stack's three parameters, by ARN. Not ssm:* on "*".
     resources = [
-      aws_secretsmanager_secret.database_url_app.arn,
-      aws_secretsmanager_secret.database_url_owner.arn,
-      aws_secretsmanager_secret.anthropic_api_key.arn,
+      aws_ssm_parameter.database_url_app.arn,
+      aws_ssm_parameter.database_url_owner.arn,
+      aws_ssm_parameter.anthropic_api_key.arn,
     ]
+  }
+
+  # SecureString parameters are encrypted with the AWS-managed key
+  # `alias/aws/ssm`, and reading one needs kms:Decrypt as well as
+  # ssm:GetParameters. Without this the task fails at startup with a KMS error
+  # rather than an SSM one, which sends you looking in the wrong service.
+  #
+  # The resource is "*" and the scope comes from the condition instead, for a
+  # reason rather than laziness: the AWS-managed key's ARN is not known until
+  # the account's first SecureString parameter creates it, so a data-source
+  # lookup would be a chicken-and-egg on a fresh account. `kms:ViaService`
+  # pins this to decryption performed by SSM in this region — the key cannot be
+  # used for anything else, by anyone holding this role.
+  statement {
+    sid       = "DecryptParametersViaSSMOnly"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${var.aws_region}.amazonaws.com"]
+    }
   }
 }
 
 resource "aws_iam_role_policy" "task_execution_secrets" {
-  name   = "read-stack-secrets"
+  name   = "read-stack-parameters"
   role   = aws_iam_role.task_execution.id
   policy = data.aws_iam_policy_document.read_secrets.json
 }

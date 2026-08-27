@@ -9,7 +9,7 @@
 # except the ALB, on one port.
 #
 # The alternative — private subnets plus interface endpoints for ECR, SQS,
-# Secrets Manager and CloudWatch Logs — is the more conventional answer and is
+# SSM Parameter Store and CloudWatch Logs — is the more conventional answer and is
 # stronger isolation, but it is ~$7/month per endpoint per AZ and would cost
 # more than the NAT it replaces. For a stack that is cycled up and down, public
 # subnets with tight security groups is the honest trade. The S3 *gateway*
@@ -132,7 +132,7 @@ resource "aws_security_group" "api" {
     for_each = var.enable_alb ? [] : [1]
 
     content {
-      description = "API port, direct — no load balancer in this configuration"
+      description = "API port, direct - no load balancer in this configuration"
       from_port   = 8000
       to_port     = 8000
       protocol    = "tcp"
@@ -140,7 +140,7 @@ resource "aws_security_group" "api" {
     }
   }
 
-  # Outbound is open because the task must reach ECR, Secrets Manager, SQS,
+  # Outbound is open because the task must reach ECR, SSM Parameter Store, SQS,
   # Neon and (in anthropic mode) the model API. This is the trade the
   # no-NAT decision makes explicit: the task has a public IP, and nothing can
   # reach it inbound except the ALB.
@@ -157,7 +157,7 @@ resource "aws_security_group" "api" {
 
 resource "aws_security_group" "worker" {
   name        = "${local.name}-worker"
-  description = "Worker tasks. No inbound at all — they poll, nothing calls them."
+  description = "Worker tasks. No inbound at all - they poll, nothing calls them."
   vpc_id      = aws_vpc.main.id
 
   egress {

@@ -188,13 +188,21 @@ budgets=$(aws budgets describe-budgets --account-id "$(aws sts get-caller-identi
 echo "  kept    budgets (free, and worth keeping):"
 echo "${budgets:-  (none — consider leaving one in place)}" | sed 's/^/          /'
 
-# Secrets are the one thing where "still there" is usually correct: a deleted
-# secret with a recovery window keeps its NAME reserved, which breaks the next
-# apply. This stack sets recovery_window_in_days = 0 so they go immediately.
-probe "secrets pending deletion (would block the next apply)" -- \
+# SSM parameters delete immediately — there is no recovery window and therefore
+# none of the "a secret with this name is scheduled for deletion" trouble that
+# Secrets Manager used to cause on the next apply. Probed anyway, because a
+# parameter that survives a destroy is a credential nobody is watching.
+probe "SSM parameters" -- \
+  aws ssm describe-parameters --region "$REGION" \
+  --parameter-filters "Key=Name,Option=BeginsWith,Values=/${PROJECT_TAG}" \
+  --query 'Parameters[].Name' --output text
+
+# Kept from when this stack used Secrets Manager: an account that once had them
+# can still be holding one, and a forgotten secret is $0.40/month forever.
+probe "Secrets Manager secrets (this stack no longer creates any)" -- \
   aws secretsmanager list-secrets --region "$REGION" \
   --include-planned-deletion \
-  --query "SecretList[?contains(Name, '${PROJECT_TAG}') && DeletedDate!=null].Name" \
+  --query "SecretList[?contains(Name, '${PROJECT_TAG}')].Name" \
   --output text
 
 # S3 is EXPECTED to survive: the documents bucket is deliberately outside the

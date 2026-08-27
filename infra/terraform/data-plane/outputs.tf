@@ -77,12 +77,20 @@ output "worker_task_role_arn" {
   value       = aws_iam_role.worker_task.arn
 }
 
-output "secret_arns" {
-  description = "Referenced by the task definitions; the values never enter one."
+output "parameter_arns" {
+  description = <<-EOT
+    SSM parameter ARNs, referenced by the task definitions' `secrets` blocks.
+    The values themselves never enter a task definition.
+
+    Renamed from `secret_arns` when the stack moved off Secrets Manager. The
+    rename is deliberate rather than a compatibility shim: an output called
+    `secret_arns` holding SSM ARNs is the kind of small lie that costs someone
+    an hour in two years.
+  EOT
   value = {
-    database_url_app   = aws_secretsmanager_secret.database_url_app.arn
-    database_url_owner = aws_secretsmanager_secret.database_url_owner.arn
-    anthropic_api_key  = aws_secretsmanager_secret.anthropic_api_key.arn
+    database_url_app   = aws_ssm_parameter.database_url_app.arn
+    database_url_owner = aws_ssm_parameter.database_url_owner.arn
+    anthropic_api_key  = aws_ssm_parameter.anthropic_api_key.arn
   }
 }
 
@@ -102,13 +110,13 @@ output "cost_runway" {
     credits_usd = var.credit_balance_usd
     # Figures from docs/cost_model.md, recomputed here so the output cannot
     # quietly disagree with the document.
-    months_if_running_24x7      = format("%.1f", var.credit_balance_usd / 14.47)
-    months_if_parked            = format("%.0f", var.credit_balance_usd / 1.81)
-    months_if_compute_destroyed = format("%.0f", var.credit_balance_usd / 1.31)
+    months_if_running_24x7      = format("%.1f", var.credit_balance_usd / 13.27)
+    months_if_parked            = format("%.0f", var.credit_balance_usd / 0.61)
+    months_if_compute_destroyed = format("%.0f", var.credit_balance_usd / 0.11)
     note = join(" ", [
       "Running 24/7 assumes enable_alb = false and a 256/512 API task.",
       "Turning the ALB on adds ~$16.43/mo and cuts the first figure to about",
-      format("%.1f", var.credit_balance_usd / 30.90),
+      format("%.1f", var.credit_balance_usd / 29.70),
       "months. Anthropic API usage is billed by Anthropic and no AWS credit covers it.",
     ])
   }
