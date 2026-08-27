@@ -95,3 +95,21 @@ output "cost_alerts_topic_arn" {
   description = "Budget and billing-alarm notifications. Confirm the email subscription."
   value       = aws_sns_topic.cost_alerts.arn
 }
+
+output "cost_runway" {
+  description = "How long the credit balance lasts, at this stack's three resting states."
+  value = {
+    credits_usd = var.credit_balance_usd
+    # Figures from docs/cost_model.md, recomputed here so the output cannot
+    # quietly disagree with the document.
+    months_if_running_24x7   = format("%.1f", var.credit_balance_usd / 9.62)
+    months_if_parked         = format("%.0f", var.credit_balance_usd / 0.61)
+    months_if_compute_destroyed = format("%.0f", var.credit_balance_usd / 0.11)
+    note = join(" ", [
+      "Running 24/7 assumes enable_alb = false and a 256/512 API task.",
+      "Turning the ALB on adds ~$16.43/mo and cuts the first figure to about",
+      format("%.1f", var.credit_balance_usd / 26.05),
+      "months. Anthropic API usage is billed by Anthropic and no AWS credit covers it.",
+    ])
+  }
+}

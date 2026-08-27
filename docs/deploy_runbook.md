@@ -89,8 +89,12 @@ aws cloudwatch describe-alarms --region us-east-1 \
   --query 'MetricAlarms[].{Name:AlarmName,State:StateValue}' --output table
 ```
 
-At ~$36/month standing, a $10 budget breaches after about **8 days** — the
-alert arrives while a forgotten stack is still a rounding error.
+At ~$10.82/month standing, a $10 budget breaches after about **28 days**. If
+you are on a promotional-credit account, the budget that matters more is
+`docfactory-dev-out-of-pocket`: it counts spend with credits EXCLUDED, so it
+reads $0.00 while the balance holds and alerts on the first cent of real money.
+`terraform output cost_runway` prints how long the balance lasts in each
+resting state.
 
 ### 1.2 CLI authentication
 
@@ -751,21 +755,18 @@ one pass, then remove it and add the specific grants. Never leave it attached.
 
 ## Cost summary
 
-Full breakdown in [cost_model.md](cost_model.md), which corrects the figure
-this table used to give: a standing stack is **~$36/month**, not "~$16, the
-ALB". The API task alone costs more than the load balancer.
+Full breakdown in [cost_model.md](cost_model.md). The defaults changed in
+`7b7c4f1` for a credit-funded account: no load balancer, a 256/512 API task,
+workers on Spot. A standing stack is **~$10.82/month**, down from ~$36.
 
 | Resource | Idle cost | Note |
 |---|---|---|
-| ALB | **$16.43/mo** | The price of a stable URL. Destroy the compute layer to stop it. |
-| Fargate — API | **$18.02/mo** at 1 task (0.5 vCPU, 1 GB) | The largest single line. Goes with the compute layer. |
-| Secrets Manager | $1.20/mo | Three secrets at $0.40. Survives a compute destroy. |
+| Fargate — API | **$9.01/mo** at 1 task (256 CPU units, 512 MiB) | The largest line, and the only task that runs when idle. |
+| ALB | **$0** by default | `enable_alb = false`; the task's public IP is the endpoint (`make api-url`). Turn it on for ~$16.43/mo when you need a stable hostname. |
+| Secrets Manager | $1.20/mo | Three secrets at $0.40. Survives a compute destroy; the largest remaining removal candidate. |
 | CloudWatch composite alarm | $0.50/mo | Not in the free tier; the metric alarms are. |
-| Fargate — workers | **$0 idle** | `worker_min_count = 0`; they exist only under backlog. |
-| NAT gateway | ~$32/mo | **This stack creates none.** Tasks run in public subnets, closed by security groups. |
-| S3 / SQS / Secrets / ECR / logs | cents | Log retention capped at 7 days; untagged layers expire after 1. |
-| Neon | $0 | Scales to zero between demos. |
+| Fargate — workers | **$0** idle | Zero when idle, and on Spot (~70% off) when not. |
 
-Parked with `make aws-park` (tasks at 0, ALB standing): **~$18.33/mo**.
-Compute destroyed, data plane kept: **~$1.31/mo**. A three-hour demo brought up
-and destroyed the same evening: **$0.14**.
+Parked with `make aws-park` (all tasks at 0): **~$1.81/mo**. Compute destroyed,
+data plane kept: **~$0.11/mo**. A three-hour demo brought up and destroyed the
+same evening: **$0.04**.

@@ -104,6 +104,28 @@ variable "monthly_budget_usd" {
   }
 }
 
+variable "credit_balance_usd" {
+  description = <<-EOT
+    Promotional credits on the account, for the runway figure in the outputs.
+
+    Documentation only — Terraform cannot read a credit balance, and nothing
+    enforces this. It exists so `terraform output cost_runway` can say
+    something concrete instead of leaving the arithmetic to the reader.
+
+    Two things credits do NOT cover, worth knowing before relying on the
+    number: the Anthropic API is billed by Anthropic, not AWS, so a real-model
+    run spends money that no AWS credit touches; and support plans and some
+    Marketplace charges are excluded from most credit programmes.
+  EOT
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.credit_balance_usd >= 0
+    error_message = "credit_balance_usd cannot be negative."
+  }
+}
+
 variable "cost_alert_email" {
   description = <<-EOT
     Where budget and billing alarms go. Empty creates the SNS topic and the

@@ -38,6 +38,10 @@ resource "aws_sns_topic_subscription" "cost_alerts_email" {
 # forecast breach fires while there is still time to destroy something. AWS
 # needs a few days of history before it will forecast at all, so it is a
 # supplement to the actual thresholds rather than a replacement.
+#
+# This budget counts spend WITH credits applied, which makes it a burn-rate
+# gauge: how fast the credit balance is going down. The out-of-pocket budget
+# below is the one that answers the different and more important question.
 resource "aws_budgets_budget" "monthly" {
   name         = "${local.name}-monthly"
   budget_type  = "COST"
@@ -65,6 +69,52 @@ resource "aws_budgets_budget" "monthly" {
     threshold                  = 100
     threshold_type             = "PERCENTAGE"
     notification_type          = "FORECASTED"
+    subscriber_sns_topic_arns  = [aws_sns_topic.cost_alerts.arn]
+    subscriber_email_addresses = var.cost_alert_email != "" ? [var.cost_alert_email] : []
+  }
+}
+
+# --- tripwire 1b: am I spending REAL money? ---------------------------------
+#
+# The question a promotional-credit account actually needs answered, and the
+# monthly budget above cannot answer it. That one counts spend after credits
+# are applied, so while credits last it reads near zero — reassuring right up
+# to the day the balance hits zero and every subsequent dollar is yours.
+#
+# `include_credit = false` inverts it: this budget counts only the spend that
+# credits did NOT cover. It sits at $0.00 for as long as the balance holds, and
+# the moment it moves, real money is leaving. The limit is deliberately $1 with
+# an alert at 1% — that is one cent — because the useful signal is not "how
+# much" but "at all".
+#
+# It is a notification, not a brake. Nothing in AWS stops a resource billing on
+# your behalf; what this buys is finding out on the first cent instead of at
+# the end of the month.
+resource "aws_budgets_budget" "out_of_pocket" {
+  name         = "${local.name}-out-of-pocket"
+  budget_type  = "COST"
+  limit_amount = "1"
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
+
+  cost_types {
+    # The whole point. Everything else here is the AWS default, restated
+    # explicitly so a future reader can see that only one flag is unusual.
+    include_credit   = false
+    include_refund   = false
+    include_upfront  = true
+    include_tax      = true
+    include_support  = true
+    include_discount = true
+    use_amortized    = false
+    use_blended      = false
+  }
+
+  notification {
+    comparison_operator        = "GREATER_THAN"
+    threshold                  = 1 # 1% of $1 — one cent of real money
+    threshold_type             = "PERCENTAGE"
+    notification_type          = "ACTUAL"
     subscriber_sns_topic_arns  = [aws_sns_topic.cost_alerts.arn]
     subscriber_email_addresses = var.cost_alert_email != "" ? [var.cost_alert_email] : []
   }

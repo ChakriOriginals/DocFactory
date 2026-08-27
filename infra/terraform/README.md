@@ -131,7 +131,7 @@ permissions.
 | | data-plane | compute-plane |
 |---|---|---|
 | Holds | bucket, queues, secrets, registries, IAM | VPC, ALB, ECS, autoscaling, log groups |
-| Idle cost | ~$1.31/mo (mostly Secrets Manager) | ~$34.45/mo — ALB $16.43 + always-on API task $18.02 |
+| Idle cost | ~$1.31/mo (mostly Secrets Manager) | **~$9.62/mo** — one 256/512 API task; no ALB by default |
 | Safe to destroy alone | no (compute depends on it) | **yes — this is the overnight park** |
 | Applied against LocalStack | yes, 28/33 resources | no (not emulated) |
 | Survives its own destroy | the documents bucket, by design | nothing |

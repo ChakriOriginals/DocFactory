@@ -29,7 +29,7 @@ LS_TARGETS := \
 	-target='aws_iam_role.github_deploy[0]'
 
 .PHONY: setup up down seed test lint fmt eval eval-gate costs migrate calibrate calibrate-fit drift-experiment \
-	aws-park aws-unpark aws-cost heal \
+	aws-park aws-unpark aws-cost api-url heal \
 	localstack-up localstack-down localstack-apply localstack-verify localstack-destroy localstack-cycle
 
 .env:
@@ -106,6 +106,20 @@ eval-gate: .env
 
 migrate: .env
 	uv run alembic upgrade head
+
+## Where is the API right now? With no load balancer the task's public IP is
+## the endpoint, and it changes whenever the task is replaced — so this asks
+## ECS rather than reading a value that goes stale.
+api-url:
+	@task=$$(aws ecs list-tasks --cluster $(CLUSTER) --service-name $(CLUSTER)-api \
+		--desired-status RUNNING --query 'taskArns[0]' --output text); \
+	if [ "$$task" = "None" ] || [ -z "$$task" ]; then \
+		echo "no running API task — is the stack up? (terraform apply, or make aws-unpark)"; exit 1; fi; \
+	eni=$$(aws ecs describe-tasks --cluster $(CLUSTER) --tasks "$$task" \
+		--query "tasks[0].attachments[0].details[?name=='networkInterfaceId'].value | [0]" --output text); \
+	ip=$$(aws ec2 describe-network-interfaces --network-interface-ids "$$eni" \
+		--query 'NetworkInterfaces[0].Association.PublicIp' --output text); \
+	echo "http://$$ip:8000"
 
 ## Force a healing sweep now: redrive what an outage dead-lettered, re-enqueue
 ## anything stranded. Idempotent, and the worker does it every 5 minutes anyway.

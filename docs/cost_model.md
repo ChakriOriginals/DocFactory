@@ -5,33 +5,69 @@ on-demand; a month is 730 hours. Every figure is arithmetic from published
 rates, not an observation — **nothing here has been billed yet**, because the
 stack has never been applied to a real account.
 
+## If you are on a $100 credit account, read this first
+
+The stack's defaults were changed in `7b7c4f1` specifically for this case. At
+those defaults — **no load balancer, a 256/512 API task, workers on Spot** —
+here is what $100 buys:
+
+| state | $/month | months on $100 |
+|---|---:|---:|
+| running 24/7 | **$10.82** | **9** |
+| running 24/7 with `enable_alb = true` | $27.25 | 4 |
+| parked (`make aws-park`) | $1.81 | 55 |
+| compute destroyed (`terraform destroy` in `compute-plane/`) | $0.11 | 900+ |
+
+A three-hour demo brought up and destroyed the same evening costs **$0.04**. At
+that rate the credits outlast the degree.
+
+**The one thing that could actually burn them.** Six workers pinned at maximum
+around the clock is ~$119/month on-demand — the whole balance in under a month.
+Three things stop it, and it is worth knowing all three rather than trusting
+one: `worker_max_count = 6` caps the fan-out, the queue-depth autoscaler
+returns the fleet to zero five minutes after the queue drains, and the dead
+man's switch parks anything still running after three hours regardless.
+Workers also default to Fargate Spot, which cuts that worst case to roughly
+$36/month. It is a scenario to recognise, not one to expect.
+
+**What credits do not cover.** The Anthropic API is billed by Anthropic, not
+AWS — a real-model run spends money no AWS credit touches. `MODEL_PROVIDER` is
+`mock` by default for exactly this reason, and the per-tenant budget cap bounds
+it when you do flip it. Support plans and some Marketplace charges are also
+outside most credit programmes.
+
+**Check which account plan you are on, before anything else.** AWS's newer free
+plan pauses an account when its credits run out; a paid plan bills the card. If
+you are on the free plan, do not upgrade until you mean to. This is the single
+most important cost control on the whole project and it is not something
+Terraform can set — it is one screen in the Billing console. I am not certain
+of the current terms and you should read them rather than take my word.
+
+There is now a budget for precisely this question. `docfactory-dev-out-of-pocket`
+counts spend with **credits excluded**, so it reads $0.00 for as long as the
+balance holds and alerts on the first cent of real money. The ordinary monthly
+budget counts spend *with* credits applied, which makes it a burn-rate gauge —
+useful, but reassuring right up to the day the balance hits zero.
+
+---
+
 ## The correction this document exists to make
 
-Earlier documents in this repo said the idle cost is "the ALB, ~$16/month".
-That is the largest *single* line, and it is roughly half the real number.
+An earlier version of this document said the idle cost was "the ALB, ~$16/month",
+and then that a standing stack was ~$36.35. Both are now wrong, in the good
+direction, because the defaults changed:
 
-The API service runs `api_desired_count = 1` around the clock at 512 CPU units
-and 1024 MiB, which is **$18.02/month** — more than the load balancer in front
-of it. Saying "idle ≈ the ALB" was not a lie, since the same sentences said
-"plus any running Fargate tasks", but it anchored on the wrong number. The
-honest headline is that a standing stack costs about **$36/month**, and the
-thing that makes this project cheap is not its architecture but the discipline
-of destroying it.
+| | before `7b7c4f1` | now |
+|---|---:|---:|
+| ALB | $16.43 | **$0** — off by default |
+| API task | $18.02 (512/1024) | **$9.01** (256/512) |
+| workers | on-demand | Spot, ~70% cheaper |
+| **standing total** | **$36.35** | **$10.82** |
 
-## The three states, and what each actually saves
-
-| state | what is running | monthly |
-|---|---|---|
-| **standing** | ALB + 1 API task + workers at 0 | **~$36.35** |
-| **parked** (`make aws-park`) | ALB only; all tasks at 0 | **~$18.33** |
-| **compute destroyed** (`terraform destroy` in `compute-plane/`) | secrets, images, bucket | **~$1.31** |
-| **fully destroyed** | the documents bucket, if kept | **~$0.01** |
-
-Parking halves it. Destroying the compute layer removes 96% of it. That is why
-the runbook's teardown step is a step and not an appendix — and why the
-two-layer split from 4c.5a is a cost decision as much as an architectural one.
-
-A three-hour demo, brought up and destroyed the same evening, costs **$0.14**.
+The API task was always the largest single line — more than the load balancer
+in front of it — which the "idle ≈ the ALB" framing hid. Both are now optional
+or minimal, and what keeps this project cheap is still the same discipline:
+destroy the compute layer when the demo is over.
 
 ## Line by line
 
@@ -134,3 +170,24 @@ credentials with `InvalidClientTokenId` while accepting the same credentials
 for S3, SQS, IAM and Secrets Manager in the same apply — an emulator quirk
 rather than a configuration error. `plan` is the verification those two get
 until the first real apply.
+
+
+---
+
+## Still on the list
+
+**Secrets Manager → SSM Parameter Store.** $1.20/month, which is two thirds of
+the parked cost and the largest recurring line left after the ALB and the API
+task were dealt with. Standard SSM parameters are free, hold SecureString
+values, and ECS task definitions read them through the same `valueFrom` field —
+the change is a swap in `secrets.tf`, the execution-role policy moving from
+`secretsmanager:GetSecretValue` to `ssm:GetParameters` plus a `kms:Decrypt`
+scoped by `kms:ViaService`, and updates to the IAM pre-flight table.
+
+Deliberately not done in the same pass as the ALB and sizing changes: it
+touches the credential path that Phases 4c.5 and 4d spent real effort getting
+right, and there is currently no `terraform` on this machine to validate it
+with. A $14/year saving is not worth breaking secret delivery on the first
+apply. It should be done, with `validate` and a LocalStack apply behind it —
+SSM is one of the services LocalStack Community does support, so it can be
+tested properly.
