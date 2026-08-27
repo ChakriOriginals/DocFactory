@@ -1,0 +1,35 @@
+# Copy to terraform.tfvars and edit. These must MATCH the data layer's values
+# or `check "layers_agree"` fails the plan.
+
+aws_region  = "us-east-1"
+environment = "dev"
+owner       = "your-name"
+name_prefix = "docfactory"
+
+# --- cost ---------------------------------------------------------------
+# An ALB is $16.43/month for a stable hostname. Off by default; the API task
+# keeps a public IP and `make api-url` finds it. Turn this on for an afternoon
+# when you need a link somebody else can open.
+enable_alb = false
+
+# The only task that runs on an idle stack. 256/512 is the Fargate floor.
+api_cpu    = 256
+api_memory = 512
+
+# Workers are $0 idle, so their size only decides how fast a burst drains.
+worker_cpu    = 512
+worker_memory = 1024
+
+# ~70% cheaper, and this pipeline already recovers from interruption by design.
+worker_use_spot = true
+
+api_desired_count = 1
+worker_min_count  = 0
+worker_max_count  = 6
+
+# Hours of continuously-running workers before the dead man's switch parks them.
+idle_park_hours    = 3
+log_retention_days = 7
+
+# The deployed default. Flip to "anthropic" only for a deliberate short run.
+model_provider = "mock"

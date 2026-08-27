@@ -47,16 +47,101 @@ variable "worker_max_count" {
   default     = 6
 }
 
-variable "task_cpu" {
-  description = "Fargate CPU units per task (256 = 0.25 vCPU)."
+variable "enable_alb" {
+  description = <<-EOT
+    Put an Application Load Balancer in front of the API.
+
+    DEFAULT false, and that is a cost decision. An ALB is $0.0225/hour — about
+    $16.43/month — whether or not a single request reaches it, which on a
+    standing stack was more than everything else combined except the API task
+    itself. With it off, the API task keeps its public IP (there is no NAT
+    gateway, so it already had one) and is reached directly on port 8000.
+
+    What you give up, stated plainly: the address changes every time the task
+    is replaced, there is no health-check-driven replacement in front of it,
+    and there is no TLS. For a stack that is brought up for a demo and
+    destroyed the same evening, that is the right trade. Set it true for a
+    stable URL when you actually need one — an interview, a shared link — and
+    it costs about $0.02 for the afternoon.
+
+    `terraform output api_url` tells you the right thing either way.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "api_ingress_cidrs" {
+  description = <<-EOT
+    Who may reach the API on port 8000 when there is no load balancer.
+
+    Only consulted when `enable_alb = false`; with an ALB the task accepts
+    traffic from the load balancer's security group and from nothing else.
+
+    Defaults to the whole internet because a demo URL you cannot reach is not a
+    demo. Every route except /healthz requires an API key, so this is exposure
+    rather than access — but narrowing it to your own address costs nothing:
+      api_ingress_cidrs = ["203.0.113.4/32"]
+  EOT
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
+variable "api_cpu" {
+  description = <<-EOT
+    Fargate CPU units for the API task (256 = 0.25 vCPU).
+
+    256 is the Fargate minimum and is what the API needs: it hashes an upload,
+    writes it to S3, inserts a row and enqueues a message. It does no parsing
+    and no extraction — that is the worker's job. Measured resident memory for
+    the whole API process is well under 200 MiB.
+
+    This is the only task that runs when the stack is idle, so it is the only
+    task whose size shows up on a monthly bill. Halving it from 512/1024 halves
+    the idle floor: $18.02/month to $9.01.
+  EOT
+  type        = number
+  default     = 256
+}
+
+variable "api_memory" {
+  description = "Fargate memory (MiB) for the API task. 512 is the minimum for 256 CPU units."
   type        = number
   default     = 512
 }
 
-variable "task_memory" {
-  description = "Fargate memory (MiB) per task."
+variable "worker_cpu" {
+  description = <<-EOT
+    Fargate CPU units for worker tasks.
+
+    Deliberately NOT reduced with the API. Workers run at zero when idle, so
+    their size costs nothing on a parked stack — it only affects how fast a
+    burst drains, and pdfplumber is the pipeline's one genuinely CPU-hungry
+    stage (96.7% of non-model CPU; see docs/performance.md). Making these
+    smaller would slow the demo without saving a cent.
+  EOT
+  type        = number
+  default     = 512
+}
+
+variable "worker_memory" {
+  description = "Fargate memory (MiB) for worker tasks. Parsing a large PDF is the peak."
   type        = number
   default     = 1024
+}
+
+variable "worker_use_spot" {
+  description = <<-EOT
+    Run workers on Fargate Spot (~70% cheaper), interruptions and all.
+
+    This pipeline is already built for interruption: a worker that dies
+    mid-document never deleted its message, so SQS redelivers it after the
+    visibility timeout into a handler that is idempotent by status guard. That
+    is exactly the precondition Spot asks for, and it is why this defaults to
+    true for workers and is not offered for the API — an interrupted API task
+    is a demo going dark mid-sentence.
+  EOT
+  type        = bool
+  default     = true
 }
 
 variable "idle_park_hours" {

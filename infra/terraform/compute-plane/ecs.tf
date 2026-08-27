@@ -19,6 +19,20 @@ resource "aws_ecs_cluster" "main" {
   }
 }
 
+# A cluster only accepts a capacity provider it has been told about.
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+
+  # The API and the one-off migrate task keep on-demand: an interrupted API is
+  # a demo going dark mid-sentence, and an interrupted migration is a schema
+  # change you have to reason about.
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = 1
+  }
+}
+
 resource "aws_cloudwatch_log_group" "api" {
   name              = "/ecs/${local.name}/api"
   retention_in_days = var.log_retention_days
@@ -70,8 +84,11 @@ resource "aws_ecs_task_definition" "api" {
   family                   = "${local.name}-api"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = var.task_cpu
-  memory                   = var.task_memory
+  # The only task that runs on an idle stack, so the only one whose size shows
+  # up on a monthly bill. 256/512 is the Fargate floor and is what the API
+  # needs: hash an upload, put it in S3, insert a row, enqueue a message.
+  cpu    = var.api_cpu
+  memory = var.api_memory
   execution_role_arn       = local.data_plane.task_execution_role_arn
   task_role_arn            = local.data_plane.api_task_role_arn
 
@@ -112,8 +129,11 @@ resource "aws_ecs_task_definition" "worker" {
   family                   = "${local.name}-worker"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = var.task_cpu
-  memory                   = var.task_memory
+  # Deliberately NOT shrunk with the API: workers are at zero when idle, so
+  # their size costs nothing on a parked stack and only decides how fast a
+  # burst drains. PDF parsing is the one genuinely CPU-hungry stage.
+  cpu    = var.worker_cpu
+  memory = var.worker_memory
   execution_role_arn       = local.data_plane.task_execution_role_arn
   task_role_arn            = local.data_plane.worker_task_role_arn
 
@@ -146,8 +166,9 @@ resource "aws_ecs_task_definition" "migrate" {
   family                   = "${local.name}-migrate"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 512
-  memory                   = 1024
+  # Runs for seconds, once per deploy. Its size is a rounding error either way.
+  cpu    = var.worker_cpu
+  memory = var.worker_memory
   execution_role_arn       = local.data_plane.task_execution_role_arn
   task_role_arn            = local.data_plane.api_task_role_arn
 
@@ -195,14 +216,20 @@ resource "aws_ecs_service" "api" {
     security_groups  = [aws_security_group.api.id]
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.api.arn
-    container_name   = "api"
-    container_port   = 8000
+  dynamic "load_balancer" {
+    for_each = var.enable_alb ? [1] : []
+
+    content {
+      target_group_arn = aws_lb_target_group.api[0].arn
+      container_name   = "api"
+      container_port   = 8000
+    }
   }
 
-  # Give the task time to pull secrets and warm up before the ALB judges it.
-  health_check_grace_period_seconds = 60
+  # Give the task time to pull its config and warm up before the ALB judges it.
+  # ECS rejects this outright on a service with no load balancer, so it has to
+  # be null rather than merely ignored.
+  health_check_grace_period_seconds = var.enable_alb ? 60 : null
 
   depends_on = [aws_lb_listener.http]
 
@@ -213,12 +240,32 @@ resource "aws_ecs_service" "api" {
   }
 }
 
+# Workers on Spot, by default.
+#
+# Spot is roughly 70% cheaper and can take the task away with two minutes'
+# notice. This pipeline was already built for exactly that: an interrupted
+# worker never deleted its message, so SQS redelivers it after the visibility
+# timeout into a handler that is idempotent by status guard — the same path a
+# crashed task already took. The precondition Spot asks for is one this system
+# had before Spot was considered.
+#
+# `capacity_provider_strategy` and `launch_type` are mutually exclusive in ECS,
+# hence the dynamic block rather than a conditional argument.
 resource "aws_ecs_service" "worker" {
   name            = "${local.name}-worker"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.worker.arn
   desired_count   = var.worker_min_count
-  launch_type     = "FARGATE"
+  launch_type     = var.worker_use_spot ? null : "FARGATE"
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.worker_use_spot ? [1] : []
+
+    content {
+      capacity_provider = "FARGATE_SPOT"
+      weight            = 1
+    }
+  }
 
   network_configuration {
     subnets          = aws_subnet.public[*].id

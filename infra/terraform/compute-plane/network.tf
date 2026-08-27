@@ -81,6 +81,8 @@ resource "aws_vpc_endpoint" "s3" {
 # --- security groups --------------------------------------------------------
 
 resource "aws_security_group" "alb" {
+  count = var.enable_alb ? 1 : 0
+
   name        = "${local.name}-alb"
   description = "Public entry point: HTTP from anywhere to the load balancer."
   vpc_id      = aws_vpc.main.id
@@ -109,12 +111,33 @@ resource "aws_security_group" "api" {
   description = "API tasks. Reachable ONLY from the load balancer, on one port."
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    description     = "API port, from the ALB only"
-    from_port       = 8000
-    to_port         = 8000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
+  # With a load balancer, the task accepts traffic from the load balancer and
+  # from nothing else. Without one the task IS the endpoint, so the port has to
+  # be reachable — narrowed by `api_ingress_cidrs`, which defaults open because
+  # a demo URL nobody can reach is not a demo. Every route except /healthz
+  # requires an API key, so this is exposure rather than access.
+  dynamic "ingress" {
+    for_each = var.enable_alb ? [1] : []
+
+    content {
+      description     = "API port, from the ALB only"
+      from_port       = 8000
+      to_port         = 8000
+      protocol        = "tcp"
+      security_groups = [aws_security_group.alb[0].id]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = var.enable_alb ? [] : [1]
+
+    content {
+      description = "API port, direct — no load balancer in this configuration"
+      from_port   = 8000
+      to_port     = 8000
+      protocol    = "tcp"
+      cidr_blocks = var.api_ingress_cidrs
+    }
   }
 
   # Outbound is open because the task must reach ECR, Secrets Manager, SQS,
