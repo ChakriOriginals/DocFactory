@@ -815,13 +815,48 @@ class TestBudgetIsolation:
         state = budget_state("dev-tenant")
         assert state.exceeded is False, "one tenant's overspend must not pause another"
 
-    def test_spend_is_computed_per_tenant_not_globally(self, spent_tenant):
+    def test_spend_is_computed_per_tenant_not_globally(self, other_tenant):
+        """acme's charge must not appear in dev-tenant's spend.
+
+        Measured as a DELTA rather than against an absolute threshold. The
+        original asserted `dev-tenant spend < $1`, which held until the
+        development database had processed enough documents for its lifetime
+        spend to cross a dollar — at which point a correct system failed a
+        correct-looking test, for a reason that has nothing to do with
+        isolation. A test whose truth depends on how much you have used the
+        machine is a test that will eventually lie about something else.
+
+        The delta form asserts the actual property: charging one tenant moves
+        that tenant's counter and nobody else's.
+        """
+        from decimal import Decimal
+
         from docfactory_core.budget import budget_state
 
-        # acme's $1.00 charge must not appear in dev-tenant's spend. The
-        # counter row is tenant-scoped and under RLS, so a read bound to
-        # dev-tenant cannot see it even though both rows live in one table.
-        assert budget_state("dev-tenant").spent_usd < 1
+        before = budget_state("dev-tenant").spent_usd
+        with admin_session_scope() as session:
+            session.execute(
+                text(
+                    "INSERT INTO tenant_spend (tenant_id, spent_usd) VALUES (:t, 1.00) "
+                    "ON CONFLICT (tenant_id) DO UPDATE "
+                    "SET spent_usd = tenant_spend.spent_usd + 1.00"
+                ),
+                {"t": OTHER},
+            )
+        try:
+            after = budget_state("dev-tenant").spent_usd
+            assert after == before, (
+                f"charging {OTHER} moved dev-tenant's counter from {before} to {after}"
+            )
+            assert budget_state(OTHER).spent_usd >= Decimal("1.00")
+        finally:
+            with admin_session_scope() as session:
+                session.execute(
+                    text(
+                        "UPDATE tenant_spend SET spent_usd = spent_usd - 1.00 WHERE tenant_id = :t"
+                    ),
+                    {"t": OTHER},
+                )
 
     def test_an_over_budget_document_pauses_instead_of_crashing(self, spent_tenant):
         """The worker records a clear state and acknowledges the message."""
