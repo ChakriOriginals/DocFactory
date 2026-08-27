@@ -13,13 +13,30 @@ here is what $100 buys:
 
 | state | $/month | months on $100 |
 |---|---:|---:|
-| running 24/7 | **$10.82** | **9** |
-| running 24/7 with `enable_alb = true` | $27.25 | 4 |
+| running 24/7 | **$14.47** | **7** |
+| running 24/7 with `enable_alb = true` | $30.90 | 3 |
 | parked (`make aws-park`) | $1.81 | 55 |
-| compute destroyed (`terraform destroy` in `compute-plane/`) | $0.11 | 900+ |
+| compute destroyed, data plane kept | $1.31 | 76 |
+| both layers destroyed | $0.01 | — |
 
-A three-hour demo brought up and destroyed the same evening costs **$0.04**. At
-that rate the credits outlast the degree.
+A three-hour demo brought up and destroyed the same evening costs **$0.05** in
+task hours. At that rate the credits outlast the degree.
+
+> **Two corrections to the first version of this table**, both found while
+> checking the stack against a credit-eligible service list.
+>
+> **Public IPv4 addresses bill at $0.005/hour** — $3.65/month per running task
+> — and were missing entirely. AWS started charging for in-use public IPv4 in
+> February 2024. This stack gives every task a public IP by design, because
+> there is no NAT gateway, so it is unavoidable while a task runs. It is
+> charged per task-hour, so parking or destroying removes it completely; it is
+> a running cost, not a resting one.
+>
+> **"Compute destroyed" was quoted as $0.11 and is $1.31.** Secrets Manager
+> lives in the *data* plane and survives a compute-plane destroy, so its $1.20
+> stays. The $0.11 figure is what you get after destroying *both* layers — or
+> after the SSM Parameter Store swap described at the end of this document,
+> which is now 92% of the resting cost rather than two thirds.
 
 **The one thing that could actually burn them.** Six workers pinned at maximum
 around the clock is ~$119/month on-demand — the whole balance in under a month.
@@ -62,7 +79,8 @@ direction, because the defaults changed:
 | ALB | $16.43 | **$0** — off by default |
 | API task | $18.02 (512/1024) | **$9.01** (256/512) |
 | workers | on-demand | Spot, ~70% cheaper |
-| **standing total** | **$36.35** | **$10.82** |
+| public IPv4 | (not counted — an error) | $3.65 |
+| **standing total** | **$36.35** | **$14.47** |
 
 The API task was always the largest single line — more than the load balancer
 in front of it — which the "idle ≈ the ALB" framing hid. Both are now optional
@@ -77,7 +95,8 @@ destroy the compute layer when the demo is over.
 |---|---|---|---|
 | **Application Load Balancer** | $0.0225/hr | **$16.43/mo** | + LCU charges, negligible below ~25 req/s |
 | **Fargate — API task** | $0.04048/vCPU-hr, $0.004445/GB-hr | **$18.02/mo** (0.5 vCPU + 1 GB, always on) | same; the API does not scale |
-| **Fargate — workers** | as above, $0.024685/task-hr | **$0.00** — `worker_min_count = 0` | $0.148 for a full 6-task fan-out for an hour |
+| **Fargate — workers** | as above, $0.024685/task-hr | **$0.00** — `worker_min_count = 0` | $0.148/hr for a full 6-task fan-out, less on Spot |
+| **Public IPv4** | $0.005/hr per address **in use** | **$3.65/mo** for the one API task | +$0.005/hr per running worker |
 | **CloudWatch composite alarm** | $0.50/alarm-mo | **$0.50/mo** | same |
 | **CloudWatch metric alarms** | first 10 free | **$0.00** (5 in use) | same |
 | **CloudWatch Logs** | $0.50/GB ingest, $0.03/GB-mo | pennies at 7-day retention | scales with worker output |

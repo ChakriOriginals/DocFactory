@@ -89,7 +89,7 @@ aws cloudwatch describe-alarms --region us-east-1 \
   --query 'MetricAlarms[].{Name:AlarmName,State:StateValue}' --output table
 ```
 
-At ~$10.82/month standing, a $10 budget breaches after about **28 days**. If
+At ~$14.47/month standing, a $10 budget breaches after about **21 days**. If
 you are on a promotional-credit account, the budget that matters more is
 `docfactory-dev-out-of-pocket`: it counts spend with credits EXCLUDED, so it
 reads $0.00 while the balance holds and alerts on the first cent of real money.
@@ -757,16 +757,17 @@ one pass, then remove it and add the specific grants. Never leave it attached.
 
 Full breakdown in [cost_model.md](cost_model.md). The defaults changed in
 `7b7c4f1` for a credit-funded account: no load balancer, a 256/512 API task,
-workers on Spot. A standing stack is **~$10.82/month**, down from ~$36.
+workers on Spot. A standing stack is **~$14.47/month**, down from ~$36.
 
 | Resource | Idle cost | Note |
 |---|---|---|
 | Fargate — API | **$9.01/mo** at 1 task (256 CPU units, 512 MiB) | The largest line, and the only task that runs when idle. |
+| Public IPv4 | **$3.65/mo** while a task runs | $0.005/hr per in-use address since Feb 2024. Unavoidable with no NAT gateway; charged per task-hour, so parking removes it. |
 | ALB | **$0** by default | `enable_alb = false`; the task's public IP is the endpoint (`make api-url`). Turn it on for ~$16.43/mo when you need a stable hostname. |
 | Secrets Manager | $1.20/mo | Three secrets at $0.40. Survives a compute destroy; the largest remaining removal candidate. |
 | CloudWatch composite alarm | $0.50/mo | Not in the free tier; the metric alarms are. |
 | Fargate — workers | **$0** idle | Zero when idle, and on Spot (~70% off) when not. |
 
 Parked with `make aws-park` (all tasks at 0): **~$1.81/mo**. Compute destroyed,
-data plane kept: **~$0.11/mo**. A three-hour demo brought up and destroyed the
-same evening: **$0.04**.
+data plane kept: **~$1.31/mo** — Secrets Manager is $1.20 of that and survives.
+A three-hour demo brought up and destroyed the same evening: **$0.05**.
