@@ -1,7 +1,7 @@
 # Copy to terraform.tfvars and edit. These must MATCH the data layer's values
 # or `check "layers_agree"` fails the plan.
 
-aws_region  = "us-east-1"
+aws_region  = "us-east-2"
 environment = "dev"
 owner       = "your-name"
 name_prefix = "docfactory"

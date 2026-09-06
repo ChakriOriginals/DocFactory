@@ -3,7 +3,7 @@
 # SecureString parameters under /docfactory-<env>/ and read by the tasks at
 # runtime; nothing sensitive ends up in a task definition.
 
-aws_region  = "us-east-1"
+aws_region  = "us-east-2"
 environment = "dev"
 owner       = "your-name"
 

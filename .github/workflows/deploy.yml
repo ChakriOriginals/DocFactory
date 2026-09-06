@@ -17,7 +17,7 @@ permissions:
   id-token: write # required for OIDC: GitHub mints the token AWS trusts
 
 env:
-  AWS_REGION: us-east-1
+  AWS_REGION: us-east-2
   # Mock is the deployed default. A real-model run is a deliberate, temporary
   # change made by hand — never the state the stack sits in.
   MODEL_PROVIDER: mock

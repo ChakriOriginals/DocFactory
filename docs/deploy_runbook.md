@@ -25,7 +25,7 @@ same bucket, the same queues and the same images.
 Set this once and leave it open in every shell:
 
 ```bash
-export AWS_REGION=us-east-1
+export AWS_REGION=us-east-2
 export TF_DATA=infra/terraform/data-plane
 export TF_COMPUTE=infra/terraform/compute-plane
 ```

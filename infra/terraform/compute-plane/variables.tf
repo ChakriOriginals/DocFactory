@@ -4,9 +4,9 @@
 # data_plane.tf fails the plan if they do not.
 
 variable "aws_region" {
-  description = "Region for every resource in this layer. Must match the data layer."
+  description = "Region for every resource in this layer. Must match the data layer AND Neon."
   type        = string
-  default     = "us-east-1"
+  default     = "us-east-2"
 }
 
 variable "environment" {

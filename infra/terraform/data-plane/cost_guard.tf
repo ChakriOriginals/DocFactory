@@ -130,7 +130,11 @@ resource "aws_budgets_budget" "out_of_pocket" {
 # TWO THINGS ABOUT THIS ALARM THAT BITE:
 #
 #  1. AWS/Billing metrics are published ONLY to us-east-1, whatever region the
-#     stack runs in. The alias below exists for that alone.
+#     stack runs in — and this stack runs in us-east-2, so that is not a
+#     hypothetical. The alias below exists for that alone, and it is why
+#     `terraform destroy` can leave a billing alarm behind in a region the rest
+#     of the stack never touched. The orphan check sweeps us-east-1 separately
+#     for exactly this reason.
 #  2. They are not published at all until "Receive Billing Alerts" is enabled
 #     in Billing → Billing preferences. That is a console setting with no API
 #     and no Terraform resource. Until it is ticked, this alarm sits in
