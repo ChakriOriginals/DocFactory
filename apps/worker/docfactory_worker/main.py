@@ -3,6 +3,7 @@
 import logging
 import signal
 import threading
+from pathlib import Path
 
 from docfactory_core.bootstrap import ensure_infra
 from docfactory_core.config import get_settings
@@ -55,8 +56,57 @@ def main() -> None:
         "worker running",
         extra={"queues": [settings.ingest_queue, settings.parse_queue, settings.extract_queue]},
     )
+    # Supervise rather than join. `join` would sit here quite happily while a
+    # consumer thread was dead, which is the failure this replaces.
+    _supervise(threads, stop, settings)
     for thread in threads:
-        thread.join()
+        thread.join(timeout=30)
+
+
+def _supervise(threads: list[threading.Thread], stop: threading.Event, settings) -> None:
+    """Hold a heartbeat file fresh for exactly as long as every consumer lives.
+
+    THE FAILURE THIS EXISTS FOR. The worker is one process running three
+    consumer threads. If one of them dies — an exception escaping run_forever,
+    a thread killed by something outside Python — the process stays up, the
+    other two keep working, and the container looks perfectly healthy. The
+    stack would carry on with two thirds of a pipeline and nothing anywhere
+    would say so; documents on the dead consumer's queue would simply stop
+    moving, and the first symptom would be a queue depth nobody was watching.
+
+    ECS cannot see inside a process. What it can see is a container health
+    check, so this converts "all three consumers are alive" into something a
+    health check can read: a file whose mtime stops advancing the moment the
+    claim stops being true.
+
+    Deliberately not self-repair. Restarting a dead consumer in-process would
+    paper over whatever killed it and leave a worker in a state no test covers.
+    Letting the heartbeat go stale hands the task to ECS, which replaces it
+    with a clean one — the platform is better at that than this function would
+    be, and it is already paying for the capability.
+    """
+    heartbeat = Path(settings.worker_heartbeat_path)
+    interval = max(settings.worker_heartbeat_interval_seconds, 1)
+
+    while not stop.is_set():
+        dead = [thread.name for thread in threads if not thread.is_alive()]
+        if dead:
+            # Stop touching the file and say why. The health check fails, ECS
+            # replaces the task, and this line is what explains the restart.
+            log.error(
+                "consumer thread died; letting the heartbeat go stale so ECS replaces this task",
+                extra={"dead_threads": dead, "heartbeat": str(heartbeat)},
+            )
+            return
+        try:
+            heartbeat.touch()
+        except OSError:
+            # An unwritable heartbeat path is a misconfiguration, not a reason
+            # to kill a working worker. Log it and keep processing; the health
+            # check will fail and ECS will replace the task, which is the
+            # correct outcome for a container that cannot report its health.
+            log.exception("could not write the heartbeat", extra={"path": str(heartbeat)})
+        stop.wait(interval)
 
 
 def _healing_loop(stop: threading.Event, settings) -> None:

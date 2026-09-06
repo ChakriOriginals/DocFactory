@@ -139,6 +139,34 @@ data "aws_iam_policy_document" "resolve_dlq_urls" {
   }
 }
 
+# ECS Exec: the channel `aws ecs execute-command` opens into a running task.
+#
+# On the TASK role, not the execution role. The execution role is what Fargate
+# uses to START a container; the exec session is held by the process INSIDE it,
+# which runs as the task role. Getting that backwards produces a
+# TargetNotConnectedException and sends you looking at the wrong policy.
+#
+# These four actions do not accept a resource, so "*" is the only expressible
+# scope — the gate is `enable_execute_command` on the service, which is a
+# per-service switch, plus the caller needing ecs:ExecuteCommand of their own.
+# Holding these grants alone opens nothing.
+#
+# Both roles get it. An incident is exactly when you do not want to discover
+# that the one you can shell into is not the one that is broken.
+data "aws_iam_policy_document" "task_exec_channel" {
+  statement {
+    sid    = "EcsExecSessionChannel"
+    effect = "Allow"
+    actions = [
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+    resources = ["*"]
+  }
+}
+
 # The worker, and ONLY the worker, may drain a DLQ back into its own queue.
 #
 # 4d deliberately gave neither role anything but GetQueueUrl on the DLQs, on
@@ -196,6 +224,7 @@ data "aws_iam_policy_document" "api_task" {
   source_policy_documents = [
     data.aws_iam_policy_document.documents_bucket.json,
     data.aws_iam_policy_document.resolve_dlq_urls.json,
+    data.aws_iam_policy_document.task_exec_channel.json,
   ]
 
   # The API enqueues onto exactly two queues: `parse`, from the upload
@@ -237,6 +266,7 @@ data "aws_iam_policy_document" "worker_task" {
     data.aws_iam_policy_document.documents_bucket.json,
     data.aws_iam_policy_document.resolve_dlq_urls.json,
     data.aws_iam_policy_document.drain_dlqs.json,
+    data.aws_iam_policy_document.task_exec_channel.json,
   ]
 
   # All three main queues, because the worker consumes from all three and hands

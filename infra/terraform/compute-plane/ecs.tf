@@ -72,6 +72,10 @@ locals {
     # On AWS, S3 publishes events straight to SQS: the local webhook bridge
     # has no counterpart here, and the notification target is the queue.
     { name = "INGEST_NOTIFY_TARGET", value = "" },
+    # Read by the worker when it writes the heartbeat and by the container
+    # health check when it reads it. One value, one place, so the two cannot
+    # drift apart into a probe that watches a file nobody writes.
+    { name = "WORKER_HEARTBEAT_PATH", value = "/tmp/worker-heartbeat" },
   ]
 
   common_secrets = [
@@ -157,6 +161,36 @@ resource "aws_ecs_task_definition" "worker" {
         "awslogs-stream-prefix" = "worker"
       }
     }
+
+    # The worker has no port to probe, so its health is "are all three
+    # consumer threads alive" — a question only the process can answer. It
+    # answers by touching a file every 15s for as long as that is true, and
+    # stopping the moment it is not. This reads the file's age.
+    #
+    # Without it, ECS's only signal is whether the container EXITED, and the
+    # failure that matters here does not exit: one consumer thread dies, the
+    # process stays up, two thirds of the pipeline keeps working, and the third
+    # queue silently stops draining. That also makes this the thing that gives
+    # the deployment circuit breaker something real to judge — with no health
+    # check, a task that starts and then wedges counts as a successful deploy.
+    #
+    # 90s of staleness against a 15s heartbeat: six missed beats, so a slow GC
+    # pause or a busy moment cannot trip it, and a genuinely dead consumer is
+    # caught inside two minutes.
+    healthCheck = {
+      command = [
+        "CMD-SHELL",
+        join(" ", [
+          "python -c \"import os,sys,time;",
+          "p=os.environ.get('WORKER_HEARTBEAT_PATH','/tmp/worker-heartbeat');",
+          "sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 90 else 1)\"",
+        ])
+      ]
+      interval    = 30
+      timeout     = 5
+      retries     = 3
+      startPeriod = 60
+    }
   }])
 }
 
@@ -231,6 +265,37 @@ resource "aws_ecs_service" "api" {
   # be null rather than merely ignored.
   health_check_grace_period_seconds = var.enable_alb ? 60 : null
 
+  # SELF-HEALING: a bad deployment reverts itself.
+  #
+  # Without this, ECS rolls a broken task definition out and then keeps trying
+  # forever — the old tasks drain, the new ones crash-loop, and the service
+  # sits at zero healthy until a human notices and rolls back by hand. That is
+  # the single most likely way this stack breaks, because it is the one thing
+  # that happens on every deploy.
+  #
+  # With rollback = true, ECS watches consecutive failed task starts and, on
+  # tripping, redeploys the last task definition that reached a steady state.
+  # It costs nothing and needs no alarm to fire first.
+  #
+  # It is only as good as the signal it watches, which is what makes the
+  # worker's container health check below load-bearing rather than decorative:
+  # with no health check, "failed" means "the container exited", so a task that
+  # starts and then wedges looks like a success.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  # `aws ecs execute-command` into a running task. Free, and the difference
+  # between diagnosing an incident and guessing at one from log lines.
+  #
+  # It is a shell inside a container that holds live credentials, so it is a
+  # variable rather than a constant — see `enable_task_exec`. It defaults on
+  # because on this stack the operator and the developer are the same person,
+  # and every invocation is recorded in CloudTrail. Turn it off for a
+  # deployment where those are different people.
+  enable_execute_command = var.enable_task_exec
+
   depends_on = [aws_lb_listener.http]
 
   lifecycle {
@@ -272,6 +337,37 @@ resource "aws_ecs_service" "worker" {
     assign_public_ip = true
     security_groups  = [aws_security_group.worker.id]
   }
+
+  # SELF-HEALING: a bad deployment reverts itself.
+  #
+  # Without this, ECS rolls a broken task definition out and then keeps trying
+  # forever — the old tasks drain, the new ones crash-loop, and the service
+  # sits at zero healthy until a human notices and rolls back by hand. That is
+  # the single most likely way this stack breaks, because it is the one thing
+  # that happens on every deploy.
+  #
+  # With rollback = true, ECS watches consecutive failed task starts and, on
+  # tripping, redeploys the last task definition that reached a steady state.
+  # It costs nothing and needs no alarm to fire first.
+  #
+  # It is only as good as the signal it watches, which is what makes the
+  # worker's container health check below load-bearing rather than decorative:
+  # with no health check, "failed" means "the container exited", so a task that
+  # starts and then wedges looks like a success.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  # `aws ecs execute-command` into a running task. Free, and the difference
+  # between diagnosing an incident and guessing at one from log lines.
+  #
+  # It is a shell inside a container that holds live credentials, so it is a
+  # variable rather than a constant — see `enable_task_exec`. It defaults on
+  # because on this stack the operator and the developer are the same person,
+  # and every invocation is recorded in CloudTrail. Turn it off for a
+  # deployment where those are different people.
+  enable_execute_command = var.enable_task_exec
 
   lifecycle {
     # desired_count belongs to the autoscaler, not to Terraform: without this

@@ -26,6 +26,8 @@ receives rather than reasons. So the classification happens in process
 | Tenant over budget, cap then raised | reaper re-enqueues `budget_exceeded` documents once there is budget | ≤ 15 min | raise the cap |
 | Queue backlog | worker autoscaling, 0 → N → 0 | ~1 min to scale out | none |
 | Fleet stuck at >0 with nothing to do | dead man's switch parks it after 3h | 3h | none |
+| **A bad image deployed** | ECS deployment circuit breaker rolls back to the last task definition that reached steady state | minutes | none |
+| **A consumer thread dies, process survives** | heartbeat goes stale, container health check fails, ECS replaces the task | ~2 min | none |
 
 ## What does not heal itself
 
@@ -34,7 +36,7 @@ receives rather than reasons. So the classification happens in process
 | Corrupt or non-PDF document | permanent by classification; it fails fast to the DLQ rather than burning three retries | inspect the DLQ, fix the source |
 | Extraction that will not satisfy the schema | permanent after the built-in schema retry | look at the document; it is usually genuinely odd |
 | Image-only PDF | `needs_ocr` is a terminal *expected* state, never the DLQ | wait for the OCR tier |
-| A message that has used both redrives | the bound exists so a poison document cannot loop forever | inspect it by hand |
+| A message that has used both redrives | the bound exists so a poison document cannot loop forever | inspect it by hand — **a DLQ alarm now emails you after 15 min** |
 | An IAM denial | every call fails identically; retrying cannot fix a policy | read the AccessDenied, widen one statement — see the deploy runbook |
 | The ALB and the API task billing | nothing turns them off but you | `make aws-park`, or destroy the compute layer |
 
@@ -120,6 +122,54 @@ done
 make heal
 ```
 
+## Deployment rollback
+
+Both services carry `deployment_circuit_breaker { enable = true, rollback = true }`.
+A task definition whose tasks repeatedly fail to reach a steady state is
+abandoned and the previous one is redeployed, with no alarm and no human in
+the loop. This is the most likely way the stack breaks, because it is the one
+thing that happens on every deploy.
+
+It is only as good as its signal. ECS judges "failed" on whether a container
+exits — unless there is a container health check, in which case it judges
+health. That is why the worker's heartbeat matters beyond its own merits: it
+turns a wedged task from a successful deployment into a rolled-back one.
+
+## The worker heartbeat
+
+The worker is one process with three consumer threads. If one dies, the
+process stays up and two thirds of the pipeline keeps working — no crash, no
+error, and the first symptom is a queue that stopped draining.
+
+`_supervise()` touches `/tmp/worker-heartbeat` every 15s for exactly as long as
+**all three** threads are alive, and stops the moment one is not. The container
+health check fails after 90s of staleness (six missed beats, so a slow moment
+cannot trip it) and ECS replaces the task.
+
+Deliberately not self-repair: restarting a dead consumer in-process would paper
+over whatever killed it and leave the worker in a state no test covers. Going
+stale hands the task to a platform that is better at replacing it.
+
+```bash
+# why did a worker restart?
+aws logs filter-log-events --log-group-name /ecs/docfactory-dev/worker \
+  --filter-pattern '"consumer thread died"'
+```
+
+## Getting inside a running task
+
+```bash
+aws ecs execute-command --cluster docfactory-dev \
+  --task "$(aws ecs list-tasks --cluster docfactory-dev \
+    --service-name docfactory-dev-worker --query 'taskArns[0]' --output text)" \
+  --container worker --interactive --command /bin/sh
+```
+
+Needs `enable_task_exec = true` (the default) and `ssmmessages:*` on the TASK
+role — not the execution role, a distinction that costs an afternoon if you get
+it the wrong way round. Set `enable_task_exec = false` for a deployment where
+the operator and the developer are different people.
+
 ## Tuning
 
 All of it is configuration, never constants:
@@ -131,6 +181,8 @@ All of it is configuration, never constants:
 | `DLQ_MAX_REDRIVES` | 2 | laps a dead-lettered message may take |
 | `BREAKER_THRESHOLD` | 5 | consecutive transient failures before opening |
 | `BREAKER_COOLDOWN_SECONDS` | 60 | how long the provider is left alone |
+| `WORKER_HEARTBEAT_PATH` | `/tmp/worker-heartbeat` | the file the health check reads |
+| `WORKER_HEARTBEAT_INTERVAL_SECONDS` | 15 | how often it is touched; the probe allows 90s of staleness |
 
 ## The rule every healing mechanism follows
 

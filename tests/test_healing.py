@@ -455,3 +455,108 @@ class TestChaosLite:
         # Should log and return, not raise.
         _healing_loop(Once(), settings)
         assert not stop.is_set()
+
+
+class TestConsumerSupervision:
+    """The heartbeat is only fresh while every consumer thread is alive.
+
+    The failure it exists for is quiet: the worker is one process running three
+    consumer threads, and if one dies the process stays up and the other two
+    keep working. Two thirds of a pipeline, no error anywhere, and the first
+    symptom is a queue that stopped draining. ECS cannot see inside a process,
+    so this turns the claim into a file mtime that a container health check can
+    read.
+    """
+
+    def _settings(self, path, interval=0.02):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            worker_heartbeat_path=str(path),
+            worker_heartbeat_interval_seconds=interval,
+        )
+
+    def test_the_heartbeat_advances_while_every_consumer_lives(self, tmp_path):
+        import threading
+        import time
+
+        from docfactory_worker.main import _supervise
+
+        beat = tmp_path / "hb"
+        stop = threading.Event()
+        alive = [
+            threading.Thread(target=lambda: stop.wait(5), name=f"consumer-{i}") for i in range(3)
+        ]
+        for thread in alive:
+            thread.start()
+
+        supervisor = threading.Thread(
+            target=_supervise, args=(alive, stop, self._settings(beat)), daemon=True
+        )
+        supervisor.start()
+        time.sleep(0.15)
+        first = beat.stat().st_mtime if beat.exists() else None
+        assert first is not None, "no heartbeat written while all consumers were alive"
+
+        time.sleep(0.15)
+        assert beat.stat().st_mtime >= first, "heartbeat stopped advancing"
+
+        stop.set()
+        supervisor.join(timeout=2)
+        for thread in alive:
+            thread.join(timeout=2)
+
+    def test_a_dead_consumer_freezes_the_heartbeat(self, tmp_path):
+        """The whole point: stop claiming health, let ECS replace the task.
+
+        Deliberately NOT self-repair. Restarting a dead consumer in-process
+        would paper over whatever killed it and leave the worker in a state no
+        test covers; going stale hands the task to a platform that is better at
+        replacing it.
+        """
+        import threading
+        import time
+
+        from docfactory_worker.main import _supervise
+
+        beat = tmp_path / "hb"
+        stop = threading.Event()
+        doomed = threading.Thread(target=lambda: None, name="consumer-doomed")
+        doomed.start()
+        doomed.join()  # it is now dead
+        assert not doomed.is_alive()
+
+        _supervise([doomed], stop, self._settings(beat))  # returns immediately
+
+        frozen_at = beat.stat().st_mtime if beat.exists() else None
+        time.sleep(0.1)
+        if frozen_at is not None:
+            assert beat.stat().st_mtime == frozen_at, "heartbeat kept advancing after a death"
+        assert not stop.is_set(), "supervision must not stop the surviving consumers itself"
+
+    def test_an_unwritable_heartbeat_does_not_kill_a_working_worker(self, tmp_path):
+        """A misconfigured path is not a reason to stop processing documents.
+
+        The health check will fail and ECS will replace the task, which is the
+        right outcome for a container that cannot report its health — but it
+        should keep working until it is replaced, not fall over immediately.
+        """
+        import threading
+
+        from docfactory_worker.main import _supervise
+
+        stop = threading.Event()
+        alive = threading.Thread(target=lambda: stop.wait(5), name="consumer-0")
+        alive.start()
+
+        unwritable = tmp_path / "no-such-directory" / "hb"
+        supervisor = threading.Thread(
+            target=_supervise, args=([alive], stop, self._settings(unwritable)), daemon=True
+        )
+        supervisor.start()
+        threading.Event().wait(0.1)
+        assert supervisor.is_alive(), "an unwritable heartbeat path killed the supervisor"
+
+        stop.set()
+        supervisor.join(timeout=2)
+        alive.join(timeout=2)

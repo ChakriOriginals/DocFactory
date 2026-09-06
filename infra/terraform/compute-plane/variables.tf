@@ -164,6 +164,27 @@ variable "idle_park_hours" {
   }
 }
 
+variable "enable_task_exec" {
+  description = <<-EOT
+    Allow `aws ecs execute-command` to open a shell in a running task.
+
+    Free, and it is the difference between diagnosing an incident and guessing
+    at one from log lines — you can check what the container actually resolved
+    for an env var, whether it can reach Neon, what the queue client sees.
+
+    It is also a shell inside a container holding live credentials. Defaults on
+    because on this stack the operator and the developer are the same person
+    and every invocation is written to CloudTrail; turn it off for a deployment
+    where those are different people.
+
+    Requires ssmmessages:* on the TASK role (granted in the data layer), not
+    the execution role — a distinction that costs an afternoon if you get it
+    the wrong way round.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "log_retention_days" {
   description = "CloudWatch log retention. Log groups are a silent forever-cost without it."
   type        = number

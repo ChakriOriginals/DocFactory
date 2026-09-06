@@ -113,6 +113,13 @@ class Settings(BaseSettings):
     # forever, burning a model call per lap.
     dlq_max_redrives: int = 2
 
+    # Liveness. The worker touches this file only while every consumer thread
+    # is alive; the container health check reads its age. A path under /tmp
+    # because the task filesystem is ephemeral and this is not state worth
+    # keeping — it is a claim about the last few seconds.
+    worker_heartbeat_path: str = "/tmp/worker-heartbeat"
+    worker_heartbeat_interval_seconds: int = 15
+
     # Model-provider circuit breaker. Consecutive TRANSIENT failures before the
     # fleet stops calling a provider that is evidently down, and how long it
     # waits before letting one probe through.
