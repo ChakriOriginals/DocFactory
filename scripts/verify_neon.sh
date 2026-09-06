@@ -103,9 +103,27 @@ else
   q "$OWNER_URL" "DROP TABLE IF EXISTS _docfactory_preflight_should_fail" >/dev/null
 fi
 
-# --- 5. the connection is encrypted -----------------------------------------
-ssl=$(q "$APP_URL" "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
-[ "$ssl" = "t" ] && pass "app connection is TLS-encrypted" || fail "app connection is NOT encrypted (ssl=$ssl)"
+# --- 5. the server refuses unencrypted connections ---------------------------
+#
+# NOT pg_stat_ssl, which is what this originally checked and which is wrong on
+# Neon. Neon puts a proxy in front of the compute: your client's TLS session
+# terminates at the proxy, and the proxy talks to Postgres over an internal
+# connection that is not itself TLS. So pg_stat_ssl reports ssl=f on a
+# perfectly encrypted client connection, and the check failed against a
+# correctly configured database.
+#
+# The question that actually matters is not "did this connection negotiate
+# TLS" but "would the server accept one that did not". So ask it directly: try
+# to connect with encryption disabled and require that it be refused. That is
+# true of Neon, false of the compose Postgres (which has no TLS at all and
+# reports this honestly), and does not care what proxies sit in between.
+PLAIN_URL="${APP_URL%%\?*}?sslmode=disable"
+if psql "$PLAIN_URL" -tAX -c "SELECT 1" >/dev/null 2>&1; then
+  fail "server ACCEPTS unencrypted connections - credentials would cross the network in clear"
+  info "expected on the local compose Postgres; not acceptable for a deployed database"
+else
+  pass "server refuses unencrypted connections (TLS is enforced)"
+fi
 
 echo
 if [ "$FAIL" -eq 0 ]; then

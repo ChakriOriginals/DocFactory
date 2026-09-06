@@ -7,8 +7,11 @@ __pycache__/
 
 # Local config — never commit real endpoints or keys
 .env
-# Deploy-time credentials (Neon URLs), sourced by hand before terraform
-.env.deploy
+# Deploy-time credentials (Neon URLs), sourced by hand before terraform.
+# The glob matters: a bare `.env.deploy` does NOT match `.env.deploy.bak`, and
+# a `git add -A` duly committed two backups full of live passwords. Anything
+# that starts with the name is ignored now.
+.env.deploy*
 
 # Generated corpus (500 PDFs + labels; reproducible via `make seed`)
 data/synth/out/
