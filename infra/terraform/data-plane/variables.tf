@@ -56,9 +56,10 @@ variable "neon_database_url_owner" {
   description = <<-EOT
     Neon connection string for the OWNER role, used by migrations only.
 
-    Passed at apply time (TF_VAR_neon_database_url_owner) and stored in Secrets
-    Manager; never written to a file in the repo. Neon rather than RDS is a
-    deliberate choice — see infra/terraform/README.md.
+    Passed at apply time (TF_VAR_neon_database_url_owner) and stored as a
+    SecureString in SSM Parameter Store at /docfactory-<env>/database-url-owner;
+    never written to a file in the repo. Neon rather than RDS is a deliberate
+    choice — see infra/terraform/README.md.
   EOT
   type        = string
   sensitive   = true

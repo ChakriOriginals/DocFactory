@@ -78,6 +78,21 @@ data "aws_iam_policy_document" "read_secrets" {
   # lookup would be a chicken-and-egg on a fresh account. `kms:ViaService`
   # pins this to decryption performed by SSM in this region — the key cannot be
   # used for anything else, by anyone holding this role.
+  #
+  # OPEN QUESTION, DELIBERATELY LEFT OVER-GRANTED. Whether this statement is
+  # needed at all is genuinely unsettled when the parameter uses the
+  # AWS-MANAGED key (alias/aws/ssm) rather than a customer-managed one: that
+  # key's own policy already grants the account access via SSM, and AWS's ECS
+  # documentation shows kms:Decrypt for the customer-managed case. An
+  # adversarial review was asked to settle it and its verifier crashed, so the
+  # question is open rather than answered, and saying so is better than
+  # implying it was checked.
+  #
+  # Keeping it is the asymmetric bet. If it is unnecessary, the cost is one
+  # redundant statement that ViaService confines to SSM decryption in one
+  # region. If it is necessary and missing, every task dies at startup with a
+  # KMS error pointing at the wrong service. After the first successful apply,
+  # remove this statement and re-apply: if tasks still start, it was redundant.
   statement {
     sid       = "DecryptParametersViaSSMOnly"
     effect    = "Allow"

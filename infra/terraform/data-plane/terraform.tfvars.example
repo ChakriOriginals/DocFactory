@@ -1,6 +1,7 @@
 # Copy to terraform.tfvars and edit. Never commit terraform.tfvars — the Neon
-# URLs are credentials. They are passed to Secrets Manager at apply time and
-# read by the tasks at runtime; nothing sensitive ends up in a task definition.
+# URLs are credentials. They are passed to SSM Parameter Store at apply time as
+# SecureString parameters under /docfactory-<env>/ and read by the tasks at
+# runtime; nothing sensitive ends up in a task definition.
 
 aws_region  = "us-east-1"
 environment = "dev"
