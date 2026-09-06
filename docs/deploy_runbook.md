@@ -131,15 +131,24 @@ CREATE ROLE docfactory_app LOGIN PASSWORD '<generate one>'
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
 ```
 
-**Verify** (both columns must be `f` — a superuser bypasses row level security
-entirely, even with `FORCE ROW LEVEL SECURITY`, which would silently disable
-every isolation policy):
+**Verify** with the pre-flight script, which checks all of it at once and
+prints no secrets, so its output is safe to paste anywhere:
 
 ```bash
-psql "$NEON_OWNER_URL" -c \
-  "SELECT rolname, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole
-     FROM pg_roles WHERE rolname = 'docfactory_app'"
+./scripts/verify_neon.sh
 ```
+
+It asserts what the isolation model actually rests on: both URLs connect and
+point at the same database, the server is Postgres 16 (matching compose and
+CI), and the app role is not a superuser, has no BYPASSRLS, cannot create
+databases or roles, is genuinely refused `CREATE TABLE`, and connects over TLS.
+
+The superuser check is the one that matters most. A superuser ignores row level
+security completely — even with `FORCE ROW LEVEL SECURITY` — so a typo in
+`CREATE ROLE` would leave every policy in the schema as decoration while the
+isolation suite went on passing. That failure is invisible from inside the
+application, which is why it is checked against the real database before
+anything is deployed on top of it.
 
 Keep both URLs to hand:
 
