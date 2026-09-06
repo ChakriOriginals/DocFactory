@@ -65,9 +65,15 @@ else
   echo; echo "Nothing else can be checked. Fix the owner URL first."; exit 1
 fi
 
-q "$APP_URL" "SELECT 1" >/dev/null 2>&1 \
-  && pass "app role connects" \
-  || { fail "app role cannot connect: $(q "$APP_URL" 'SELECT 1')"; }
+if q "$APP_URL" "SELECT 1" >/dev/null 2>&1; then
+  pass "app role connects"
+else
+  fail "app role cannot connect: $(q "$APP_URL" 'SELECT 1' | head -1)"
+  echo
+  echo "  Nothing below can be checked without an app connection."
+  echo "  Most likely the role has not been created yet — see runbook step 1.2."
+  exit 1
+fi
 
 # --- 2. same database --------------------------------------------------------
 [ "$(q "$OWNER_URL" 'SELECT current_database()')" = "$(q "$APP_URL" 'SELECT current_database()')" ] \
