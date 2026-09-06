@@ -7,6 +7,8 @@ __pycache__/
 
 # Local config — never commit real endpoints or keys
 .env
+# Deploy-time credentials (Neon URLs), sourced by hand before terraform
+.env.deploy
 
 # Generated corpus (500 PDFs + labels; reproducible via `make seed`)
 data/synth/out/
