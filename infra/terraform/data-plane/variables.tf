@@ -216,3 +216,28 @@ variable "localstack_endpoint" {
     error_message = "localstack_endpoint must be empty or an http(s) URL."
   }
 }
+
+variable "ecr_image_retention_count" {
+  description = <<-EOT
+    How many images to keep per repository. Everything older is expired.
+
+    Each image is about 260 MB, so this is roughly $0.026/month each, against
+    an ECR free tier of 0.5 GB. Five per repository is ~2.6 GB, about $0.21/mo
+    after the free allowance -- close to what the unbounded policy already
+    costs today, with the difference that it stops growing.
+
+    Five is chosen for rollback depth, not for storage: it leaves the running
+    image plus four previous deploys to fall back to. Lower it to 3 to save
+    about $0.10/month if you never roll back by hand; raise it if you want
+    deeper history. Do not set it below 2 -- the ECS deployment circuit breaker
+    rolls back to the previous task definition, and that image has to still
+    exist for the rollback to pull.
+  EOT
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.ecr_image_retention_count >= 2
+    error_message = "Keep at least 2 images: a rollback needs the previous image to still exist."
+  }
+}

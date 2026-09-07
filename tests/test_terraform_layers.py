@@ -194,3 +194,66 @@ def test_no_aws_facing_string_contains_a_character_aws_rejects():
         + "\n  ".join(offenders)
         + "\nUse ASCII in the value; keep the prose in the comment above it."
     )
+
+
+# --- ECR retention: two changes that are only safe together -------------------
+#
+# The lifecycle policy expires images by recency. That is safe if and only if
+# `latest` always rides on the newest image, because Terraform's task
+# definitions reference `:latest` — if the tag stopped moving it would sink down
+# the list and eventually be expired out from under them, and the next
+# `terraform apply` would register a task definition pointing at an image that
+# no longer exists.
+#
+# Before the fix, `latest` was a hand-pushed image CI never touched: it was
+# already the third-newest tag in a five-image repository and sinking with every
+# deploy. Adding the count rule alone would have armed a delayed failure.
+#
+# These two tests exist to keep the pair together. Removing the `latest` push
+# from CI must fail loudly rather than quietly making the lifecycle rule unsafe.
+
+WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "deploy.yml"
+
+
+def test_the_lifecycle_policy_bounds_image_count() -> None:
+    """Unbounded tagged images cost storage forever; CI tags every push."""
+    ecr = (DATA_PLANE / "ecr.tf").read_text()
+    assert "imageCountMoreThan" in ecr, (
+        "The ECR lifecycle policy no longer bounds how many images are kept. "
+        "CI tags every image with a commit SHA, so nothing it pushes is ever "
+        "untagged and an untagged-only rule never removes anything."
+    )
+
+
+def test_ci_keeps_latest_on_the_newest_image() -> None:
+    """The count rule above is only safe while this holds."""
+    workflow = WORKFLOW.read_text()
+    ecr = (DATA_PLANE / "ecr.tf").read_text()
+
+    if "imageCountMoreThan" not in ecr:
+        pytest.skip("no count-based expiry, so `latest` sinking is harmless")
+
+    assert ':latest"' in workflow or ":latest'" in workflow or ":latest\n" in workflow, (
+        "The deploy workflow no longer pushes `:latest`, but the ECR lifecycle "
+        "policy still expires images by recency. `latest` will sink below the "
+        "retention count and be deleted, and Terraform's task definitions "
+        "reference it. Either restore the `latest` push or drop the count rule."
+    )
+    assert "docker push" in workflow and "latest" in workflow
+
+
+def test_retention_keeps_enough_images_to_roll_back() -> None:
+    """The ECS circuit breaker rolls back to the previous task definition.
+
+    That image has to still exist, so a retention count of 1 would leave a
+    rollback with nothing to pull.
+    """
+    variables = (DATA_PLANE / "variables.tf").read_text()
+    match = re.search(
+        r'variable\s+"ecr_image_retention_count".*?default\s*=\s*(\d+)', variables, re.DOTALL
+    )
+    assert match, "ecr_image_retention_count is no longer declared with a default"
+    assert int(match.group(1)) >= 2, (
+        "Retention below 2 breaks rollback: the circuit breaker pulls the "
+        "previous task definition's image, which would already be expired."
+    )

@@ -154,9 +154,19 @@ jobs:
           TAG: ${{ github.sha }}
         run: |
           for service in api worker; do
-            image="$REGISTRY/docfactory-dev-$service:$TAG"
-            docker build -f "infra/docker/Dockerfile.$service" -t "$image" .
-            docker push "$image"
+            repo="$REGISTRY/docfactory-dev-$service"
+            docker build -f "infra/docker/Dockerfile.$service" -t "$repo:$TAG" .
+            docker push "$repo:$TAG"
+
+            # `latest` moves with every deploy, and that is load-bearing twice
+            # over. Terraform's task definitions reference :latest, so a stale
+            # tag means `terraform apply` registers a definition pointing at old
+            # code. And the ECR lifecycle rule keeps images by recency -- if
+            # :latest stopped moving it would sink down the list and eventually
+            # be expired out from under Terraform. Retagging costs nothing: it
+            # is the same image, so ECR stores one copy with two tags.
+            docker tag "$repo:$TAG" "$repo:latest"
+            docker push "$repo:latest"
           done
 
       - name: Migrate (owner role, before the services roll)
