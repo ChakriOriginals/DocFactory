@@ -1,8 +1,7 @@
 # DocFactory
 
 Multi-tenant document-intelligence platform, built in strict phases to a production bar.
-Current state: **Phase 0** — local stack + synthetic invoice corpus. One hardcoded
-invoice pipeline (upload → store → queue → parse → extract → validate) lands in Phase 1.
+Current state: **Phase 0** — local stack + synthetic invoice corpus. The Invoice pipeline (upload → store → queue → parse → extract → validate) lands in Phase 1.
 
 ## Layout
 
