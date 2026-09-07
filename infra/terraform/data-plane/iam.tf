@@ -311,6 +311,36 @@ locals {
     ? var.github_oidc_provider_arn
     : aws_iam_openid_connect_provider.github[0].arn
   ) : ""
+
+  # THE SUBJECT CLAIM IS NOT WHAT THE GUIDES SAY IT IS.
+  #
+  # Every OIDC walkthrough, including AWS's own, tells you to match
+  # "repo:OWNER/REPO:*". GitHub no longer sends that. The default subject claim
+  # now embeds immutable numeric IDs for the owner and the repository:
+  #
+  #   repo:ChakriOriginals@70372465/DocFactory@1359728448:environment:dev
+  #
+  # Confirmed two ways: the sub_claim_prefix reported by
+  # /repos/{owner}/{repo}/actions/oidc/customization/sub, and the principalId
+  # CloudTrail recorded for the AccessDenied. The name-only pattern does not
+  # match it, and the failure is a bare "Not authorized to perform
+  # sts:AssumeRoleWithWebIdentity" with nothing pointing at the cause -- the
+  # trust policy reads correctly, the provider is right, id-token: write is set.
+  # CloudTrail's principalId is the only place the real claim appears.
+  #
+  # Both forms are allowed. The ID form is what GitHub sends today and is
+  # strictly stronger -- renaming the repo or the account cannot forge it. The
+  # name form is kept so this does not break if GitHub serves the older claim,
+  # and it is still pinned to this one repository.
+  github_owner = local.enable_oidc ? split("/", var.github_repository)[0] : ""
+  github_repo  = local.enable_oidc ? split("/", var.github_repository)[1] : ""
+
+  github_sub_patterns = compact([
+    "repo:${var.github_repository}:*",
+    var.github_owner_id != "" && var.github_repository_id != ""
+    ? "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo}@${var.github_repository_id}:*"
+    : "",
+  ])
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -341,10 +371,11 @@ data "aws_iam_policy_document" "github_assume" {
 
     # Scoped to this repository. Without this condition ANY GitHub repository
     # in the world could assume the role — the classic OIDC misconfiguration.
+    # See the comment on github_sub_patterns above for why there are two.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repository}:*"]
+      values   = local.github_sub_patterns
     }
   }
 }

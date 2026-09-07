@@ -152,6 +152,34 @@ variable "github_repository" {
   default     = ""
 }
 
+variable "github_owner_id" {
+  description = <<-EOT
+    Numeric account ID of the repository owner, as a string.
+
+    GitHub's default OIDC subject claim embeds immutable numeric IDs:
+      repo:OWNER@<owner_id>/REPO@<repo_id>:environment:dev
+    not the "repo:OWNER/REPO:..." every guide shows. Without these, the trust
+    policy does not match and the deploy fails with a bare "Not authorized to
+    perform sts:AssumeRoleWithWebIdentity".
+
+    Find them with:
+      gh api repos/OWNER/REPO --jq '"owner=\(.owner.id) repo=\(.id)"'
+
+    Or read the prefix GitHub will actually send:
+      gh api repos/OWNER/REPO/actions/oidc/customization/sub
+
+    Leave empty to match only the legacy name-only claim.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "github_repository_id" {
+  description = "Numeric ID of the repository, as a string. See github_owner_id."
+  type        = string
+  default     = ""
+}
+
 variable "github_oidc_provider_arn" {
   description = <<-EOT
     Existing GitHub OIDC provider ARN, if the account already has one.

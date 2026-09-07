@@ -18,6 +18,13 @@ model_provider = "mock"
 # Set once a GitHub repository exists; empty skips the OIDC role entirely.
 github_repository = "" # "your-user/DocFactory"
 
+# GitHub's OIDC subject claim embeds immutable numeric IDs, so the trust policy
+# has to know them. Without these the deploy job fails with a bare
+# "Not authorized to perform sts:AssumeRoleWithWebIdentity".
+#   gh api repos/OWNER/REPO --jq '"owner=\(.owner.id) repo=\(.id)"'
+github_owner_id      = ""
+github_repository_id = ""
+
 # Guard rail: leave false so `terraform destroy` refuses to delete documents.
 force_destroy_documents = false
 
