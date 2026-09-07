@@ -164,6 +164,12 @@ if [ "$REGION" != "us-east-1" ]; then
     aws cloudwatch describe-alarms --region us-east-1 \
     --alarm-name-prefix "${PROJECT_TAG}" \
     --query 'MetricAlarms[].AlarmName' --output text
+
+  # That alarm needs its own SNS topic in its own region, because alarm actions
+  # cannot cross regions. It is as easy to strand as the alarm itself.
+  probe "SNS topics in us-east-1 (the billing alarm's own topic)" -- \
+    aws sns list-topics --region us-east-1 \
+    --query "Topics[?contains(TopicArn, '${PROJECT_TAG}')].TopicArn" --output text
 fi
 
 probe "SNS topics" -- \

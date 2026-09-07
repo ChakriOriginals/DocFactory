@@ -173,6 +173,35 @@ provider "aws" {
   }
 }
 
+# A SECOND topic, in us-east-1, for the one alarm that has to live there.
+#
+# CloudWatch alarm actions must target an SNS topic in the SAME region as the
+# alarm. The billing alarm is pinned to us-east-1 because AWS/Billing publishes
+# nowhere else; the rest of this stack — and the cost_alerts topic above — is
+# in us-east-2. The first real apply rejected the alarm with "Invalid region
+# us-east-2 specified", which reads like a provider misconfiguration and is
+# actually the alarm_actions ARN being cross-region.
+#
+# Two topics is the correct answer rather than a workaround: the constraint is
+# AWS's, and the alternative — moving the whole stack to us-east-1 for the sake
+# of one alarm — is a worse trade than one extra free topic. Both are free, and
+# email notifications are free to 1,000/month, so this costs nothing but a
+# second confirmation email.
+resource "aws_sns_topic" "cost_alerts_billing" {
+  provider = aws.billing
+
+  name = "${local.name}-cost-alerts-billing"
+}
+
+resource "aws_sns_topic_subscription" "cost_alerts_billing_email" {
+  provider = aws.billing
+  count    = var.cost_alert_email != "" ? 1 : 0
+
+  topic_arn = aws_sns_topic.cost_alerts_billing.arn
+  protocol  = "email"
+  endpoint  = var.cost_alert_email
+}
+
 resource "aws_cloudwatch_metric_alarm" "estimated_charges" {
   provider = aws.billing
 
@@ -194,6 +223,7 @@ resource "aws_cloudwatch_metric_alarm" "estimated_charges" {
   # sends you to check the setting than a quiet alarm that never fires.
   treat_missing_data = "breaching"
 
-  alarm_actions = [aws_sns_topic.cost_alerts.arn]
-  ok_actions    = [aws_sns_topic.cost_alerts.arn]
+  # The us-east-1 topic, not the us-east-2 one — see above.
+  alarm_actions = [aws_sns_topic.cost_alerts_billing.arn]
+  ok_actions    = [aws_sns_topic.cost_alerts_billing.arn]
 }
