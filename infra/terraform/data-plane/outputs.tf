@@ -115,8 +115,9 @@ output "cost_runway" {
     months_if_compute_destroyed = format("%.0f", var.credit_balance_usd / 0.11)
     note = join(" ", [
       "Running 24/7 assumes enable_alb = false and a 256/512 API task.",
-      "Turning the ALB on adds ~$16.43/mo and cuts the first figure to about",
-      format("%.1f", var.credit_balance_usd / 29.70),
+      "Turning the ALB on adds ~$23.73/mo all-in (balancer plus its two public",
+      "IPv4 addresses) and cuts the first figure to about",
+      format("%.1f", var.credit_balance_usd / 37.00),
       "months. Anthropic API usage is billed by Anthropic and no AWS credit covers it.",
     ])
   }

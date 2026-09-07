@@ -7,7 +7,8 @@ owner       = "your-name"
 name_prefix = "docfactory"
 
 # --- cost ---------------------------------------------------------------
-# An ALB is $16.43/month for a stable hostname. Off by default; the API task
+# An ALB is $23.73/month all-in for a stable hostname ($16.43 balancer +
+# $7.30 for its two public IPv4s). Off by default; the API task
 # keeps a public IP and `make api-url` finds it. Turn this on for an afternoon
 # when you need a link somebody else can open.
 enable_alb = false

@@ -53,8 +53,8 @@ output "teardown_reminder" {
   description = "What still costs money, and what destroying THIS layer does."
   value = join(" ", [
     var.enable_alb
-    ? "An ALB is enabled: ~$16.43/mo on top of the API task (~$9.01) — turn it off when the demo is over."
-    : "Standing cost is ~$9.62/mo, almost all of it the always-on API task (~$9.01).",
+    ? "An ALB is enabled: ~$23.73/mo on top of the API task — $16.43 for the load balancer plus $7.30 for the two public IPv4 addresses it places, one per subnet. Turn it off when the demo is over."
+    : "Standing cost is ~$13.27/mo: the always-on API task (~$9.01), its public IPv4 address ($3.65), and the data plane ($0.11).",
     "Workers are $0 idle and run on Spot; there is no NAT gateway by design.",
     "See docs/cost_model.md.",
     "`terraform destroy` HERE removes both and keeps the bucket, queues,",

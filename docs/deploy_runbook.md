@@ -810,7 +810,7 @@ stack is **~$13.27/month**, down from ~$36; parked is $0.61.
 |---|---|---|
 | Fargate — API | **$9.01/mo** at 1 task (256 CPU units, 512 MiB) | The largest line, and the only task that runs when idle. |
 | Public IPv4 | **$3.65/mo** while a task runs | $0.005/hr per in-use address since Feb 2024. Unavoidable with no NAT gateway; charged per task-hour, so parking removes it. |
-| ALB | **$0** by default | `enable_alb = false`; the task's public IP is the endpoint (`make api-url`). Turn it on for ~$16.43/mo when you need a stable hostname. |
+| ALB | **$0** by default | `enable_alb = false`; the task's public IP is the endpoint (`make api-url`). Turn it on for ~$23.73/mo when you need a stable hostname — $16.43 for the balancer and $7.30 for the public IPv4 it places in each of the two subnets. |
 | SSM Parameter Store | **$0.00** | Three SecureString parameters, Standard tier. Replaced Secrets Manager's $1.20/mo. |
 | CloudWatch alarms | **$0.00** | Eight alarm metrics across both planes (3 DLQ + billing + backlog + worker-idle's two + dead man's switch); the first ten are free. Metric math is billed per referenced metric, so worker-idle counts as two — still free, and $0.50/mo cheaper than the composite alarm it replaced. |
 | Fargate — workers | **$0** idle | Zero when idle, and on Spot (~70% off) when not. |

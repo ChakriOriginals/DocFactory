@@ -52,7 +52,8 @@ variable "enable_alb" {
     Put an Application Load Balancer in front of the API.
 
     DEFAULT false, and that is a cost decision. An ALB is $0.0225/hour — about
-    $16.43/month — whether or not a single request reaches it, which on a
+    $23.73/month all-in ($16.43 for the balancer, $7.30 for the public IPv4
+    it places in each subnet) — whether or not a single request reaches it, which on a
     standing stack was more than everything else combined except the API task
     itself. With it off, the API task keeps its public IP (there is no NAT
     gateway, so it already had one) and is reached directly on port 8000.

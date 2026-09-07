@@ -323,6 +323,14 @@ resource "aws_ecs_service" "worker" {
   desired_count   = var.worker_min_count
   launch_type     = var.worker_use_spot ? null : "FARGATE"
 
+  # FARGATE_SPOT has to be associated with the cluster before a service can ask
+  # for it. Both resources reference only aws_ecs_cluster.main, so Terraform's
+  # graph makes them siblings and is free to create them in parallel -- a race
+  # that fails the apply with "capacity provider not found" when it loses, and
+  # succeeds when it wins. An apply that only sometimes works is worse than one
+  # that never does.
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
+
   dynamic "capacity_provider_strategy" {
     for_each = var.worker_use_spot ? [1] : []
 

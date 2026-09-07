@@ -1,6 +1,8 @@
 # The load balancer — OPTIONAL, and off by default.
 #
-# An ALB is $0.0225/hour, about $16.43/month, whether or not a request ever
+# An ALB is $0.0225/hour, about $16.43/month, plus $0.005/hour for the public
+# IPv4 it places in each subnet ($7.30/month for two) — $23.73 all-in, whether
+# or not a request ever
 # reaches it. On a standing stack that was more than everything else combined
 # except the API task, for the single feature of a stable hostname.
 #

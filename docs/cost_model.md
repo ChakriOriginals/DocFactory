@@ -44,8 +44,12 @@ Three things stop it, and it is worth knowing all three rather than trusting
 one: `worker_max_count = 6` caps the fan-out, the queue-depth autoscaler
 returns the fleet to zero five minutes after the queue drains, and the dead
 man's switch parks anything still running after three hours regardless.
-Workers also default to Fargate Spot, which cuts that worst case to roughly
-$36/month. It is a scenario to recognise, not one to expect.
+Workers also default to Fargate Spot, which cuts the compute part of that
+worst case to roughly $36/month — but not the whole bill. Each running worker
+gets its own public IPv4, and Spot does not discount those: six addresses is
+$21.90/month on top of either figure. So the honest worst case is ~$141/month
+on-demand and ~$58/month on Spot. It is a scenario to recognise, not one to
+expect.
 
 **What credits do not cover.** The Anthropic API is billed by Anthropic, not
 AWS — a real-model run spends money no AWS credit touches. `MODEL_PROVIDER` is
@@ -93,8 +97,8 @@ destroy the compute layer when the demo is over.
 
 | resource | rate | idle | active |
 |---|---|---|---|
-| **Application Load Balancer** | $0.0225/hr | **$16.43/mo** | + LCU charges, negligible below ~25 req/s |
-| **Fargate — API task** | $0.04048/vCPU-hr, $0.004445/GB-hr | **$18.02/mo** (0.5 vCPU + 1 GB, always on) | same; the API does not scale |
+| **Application Load Balancer** | $0.0225/hr + 2 public IPv4 | **$0.00** — `enable_alb = false` by default | **$23.73/mo** when enabled: $16.43 for the balancer, $7.30 for the address it places in each of the two subnets, plus LCU charges (negligible below ~25 req/s) |
+| **Fargate — API task** | $0.04048/vCPU-hr, $0.004445/GB-hr | **$9.01/mo** (0.25 vCPU + 512 MiB, always on) | same; the API does not scale |
 | **Fargate — workers** | as above, $0.024685/task-hr | **$0.00** — `worker_min_count = 0` | $0.148/hr for a full 6-task fan-out, less on Spot |
 | **Public IPv4** | $0.005/hr per address **in use** | **$3.65/mo** for the one API task | +$0.005/hr per running worker |
 | **CloudWatch metric alarms** | first 10 free | **$0.00** (8 alarm metrics in use) | same |
@@ -158,9 +162,12 @@ wired to a Lambda that deletes things, and this stack deliberately does not do
 that — a robot with permission to destroy your infrastructure on a billing
 signal is a larger risk than the bill it prevents.
 
-At $36/month standing, a **$10 budget breaches after about 8 days**. That is
-the design: the alert arrives while a forgotten stack is still a rounding
-error, not after a full month.
+At the $13.27/month standing cost above, a **$10 monthly budget crosses its
+50% forecast around day 11 and the full $10 around day 23**. That is still the
+design — the alert arrives while a forgotten stack is a rounding error rather
+than after a full month — but it is a slower fuse than the "about 8 days" this
+line used to claim, which was computed against a $36/month standing cost the
+stack has not had since the ALB was made optional and the API task shrunk.
 
 ### Two things that will bite
 
