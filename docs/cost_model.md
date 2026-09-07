@@ -13,7 +13,7 @@ here is what $100 buys:
 
 | state | $/month | months on $100 |
 |---|---:|---:|
-| running 24/7 | **$13.27** | **7.5** |
+| running 24/7 | **$13.67** | **7.3** |
 | running 24/7 with `enable_alb = true` | $29.70 | 3.4 |
 | parked (`make aws-park`) | **$0.61** | 164 |
 | compute destroyed, data plane kept | **$0.11** | 900+ |
@@ -101,7 +101,7 @@ destroy the compute layer when the demo is over.
 | **Fargate — API task** | $0.04048/vCPU-hr, $0.004445/GB-hr | **$9.01/mo** (0.25 vCPU + 512 MiB, always on) | same; the API does not scale |
 | **Fargate — workers** | as above, $0.024685/task-hr | **$0.00** — `worker_min_count = 0` | $0.148/hr for a full 6-task fan-out, less on Spot |
 | **Public IPv4** | $0.005/hr per address **in use** | **$3.65/mo** for the one API task | +$0.005/hr per running worker |
-| **CloudWatch metric alarms** | first 10 free | **$0.00** (8 alarm metrics in use) | same |
+| **CloudWatch metric alarms** | first 10 free, then $0.10 each | **$0.40/mo** (14 alarm metrics in use) | same |
 | **CloudWatch Logs** | $0.50/GB ingest, $0.03/GB-mo | pennies at 7-day retention | scales with worker output |
 
 ### Billed while the data layer exists
@@ -162,7 +162,7 @@ wired to a Lambda that deletes things, and this stack deliberately does not do
 that — a robot with permission to destroy your infrastructure on a billing
 signal is a larger risk than the bill it prevents.
 
-At the $13.27/month standing cost above, a **$10 monthly budget crosses its
+At the $13.67/month standing cost above, a **$10 monthly budget crosses its
 50% forecast around day 11 and the full $10 around day 23**. That is still the
 design — the alert arrives while a forgotten stack is a rounding error rather
 than after a full month — but it is a slower fuse than the "about 8 days" this

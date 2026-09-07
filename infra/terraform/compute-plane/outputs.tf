@@ -54,7 +54,7 @@ output "teardown_reminder" {
   value = join(" ", [
     var.enable_alb
     ? "An ALB is enabled: ~$23.73/mo on top of the API task — $16.43 for the load balancer plus $7.30 for the two public IPv4 addresses it places, one per subnet. Turn it off when the demo is over."
-    : "Standing cost is ~$13.27/mo: the always-on API task (~$9.01), its public IPv4 address ($3.65), and the data plane ($0.11).",
+    : "Standing cost is ~$13.67/mo: the always-on API task (~$9.01), its public IPv4 address ($3.65), four billable CloudWatch alarm metrics ($0.40), and the data plane ($0.11).",
     "Workers are $0 idle and run on Spot; there is no NAT gateway by design.",
     "See docs/cost_model.md.",
     "`terraform destroy` HERE removes both and keeps the bucket, queues,",

@@ -500,7 +500,7 @@ watch -n 20 "aws ecs describe-services --cluster $CLUSTER \
 ```
 
 Expect roughly: backlog visible within a minute → the
-`docfactory-dev-extract-backlog` alarm fires → desired count steps to 1, then 3,
+`docfactory-dev-backlog` alarm fires → desired count steps to 1, then 3,
 then the maximum by backlog size → the queue drains → five minutes of an empty
 queue **and** nothing in flight → the `docfactory-dev-worker-idle` alarm
 fires → back to 0.
@@ -812,7 +812,7 @@ stack is **~$13.27/month**, down from ~$36; parked is $0.61.
 | Public IPv4 | **$3.65/mo** while a task runs | $0.005/hr per in-use address since Feb 2024. Unavoidable with no NAT gateway; charged per task-hour, so parking removes it. |
 | ALB | **$0** by default | `enable_alb = false`; the task's public IP is the endpoint (`make api-url`). Turn it on for ~$23.73/mo when you need a stable hostname — $16.43 for the balancer and $7.30 for the public IPv4 it places in each of the two subnets. |
 | SSM Parameter Store | **$0.00** | Three SecureString parameters, Standard tier. Replaced Secrets Manager's $1.20/mo. |
-| CloudWatch alarms | **$0.00** | Eight alarm metrics across both planes (3 DLQ + billing + backlog + worker-idle's two + dead man's switch); the first ten are free. Metric math is billed per referenced metric, so worker-idle counts as two — still free, and $0.50/mo cheaper than the composite alarm it replaced. |
+| CloudWatch alarms | **$0.40/mo** | Fourteen alarm metrics across both planes; the first ten are free, so four are billable at $0.10 each. Metric math bills per referenced metric, and both scaling alarms have to watch all three queues — watching only extract is what made the pipeline unable to start from zero. $0.40/mo to make autoscaling work at all is the cheapest line in this table. |
 | Fargate — workers | **$0** idle | Zero when idle, and on Spot (~70% off) when not. |
 
 Parked with `make aws-park` (all tasks at 0): **~$0.61/mo**. Compute destroyed,

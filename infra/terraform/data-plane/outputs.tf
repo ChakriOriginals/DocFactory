@@ -110,14 +110,14 @@ output "cost_runway" {
     credits_usd = var.credit_balance_usd
     # Figures from docs/cost_model.md, recomputed here so the output cannot
     # quietly disagree with the document.
-    months_if_running_24x7      = format("%.1f", var.credit_balance_usd / 13.27)
+    months_if_running_24x7      = format("%.1f", var.credit_balance_usd / 13.67)
     months_if_parked            = format("%.0f", var.credit_balance_usd / 0.61)
     months_if_compute_destroyed = format("%.0f", var.credit_balance_usd / 0.11)
     note = join(" ", [
       "Running 24/7 assumes enable_alb = false and a 256/512 API task.",
       "Turning the ALB on adds ~$23.73/mo all-in (balancer plus its two public",
       "IPv4 addresses) and cuts the first figure to about",
-      format("%.1f", var.credit_balance_usd / 37.00),
+      format("%.1f", var.credit_balance_usd / 37.40),
       "months. Anthropic API usage is billed by Anthropic and no AWS credit covers it.",
     ])
   }
