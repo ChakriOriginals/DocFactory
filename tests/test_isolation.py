@@ -718,6 +718,15 @@ class TestSessionScoping:
 
 
 class TestApiIsolation:
+    """Every test here enters a TestClient, which runs the app lifespan and
+    therefore ensure_infra(). Without the compose stack that is thirty retries
+    and a RuntimeError, not a skip -- which is exactly how CI failed the first
+    time it ever ran. The autouse guard makes the whole class skip instead."""
+
+    @pytest.fixture(autouse=True)
+    def _needs_object_store(self, requires_object_store):
+        pass
+
     @pytest.fixture
     def dev_client(self):
         from conftest import authenticated_client

@@ -1,8 +1,10 @@
 # The synth generator is a script directory (dev tooling), not an installed
 # package — put it on sys.path so tests can import its modules.
 import contextlib
+import socket
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).parent / "data" / "synth"))
 
@@ -44,6 +46,44 @@ def _seed_dev_key(_bind_dev_tenant):
             resolve_tenant(DEV_API_KEY)
         except AuthError:
             issue_api_key("dev-tenant", "test suite", plaintext=DEV_API_KEY)
+
+
+def object_store_reachable() -> bool:
+    """Is the compose stack's S3/SQS up?
+
+    Entering a TestClient runs the app lifespan, and the lifespan calls
+    ensure_infra(), which creates the bucket and queues. Without MinIO and
+    ElasticMQ that call does not fail fast -- it retries thirty times and then
+    raises RuntimeError, and in CI (no endpoint override, no credentials) it
+    burns thirty seconds first.
+
+    So every test that enters a TestClient has to check this. The suites that
+    only touch Postgres do not, which is what lets CI run the RLS assertions
+    against a real database with no object store present.
+    """
+    from docfactory_core.config import get_settings
+
+    settings = get_settings()
+    endpoints = (settings.s3_endpoint_url, settings.sqs_endpoint_url)
+    if not all(endpoints):
+        # No endpoint override means boto would talk to real AWS. Never do that
+        # from a test.
+        return False
+    for url in endpoints:
+        parsed = urlparse(url)
+        try:
+            with socket.create_connection((parsed.hostname, parsed.port), timeout=0.5):
+                pass
+        except OSError:
+            return False
+    return True
+
+
+@pytest.fixture
+def requires_object_store():
+    """Skip a test that needs a live TestClient when the stack is not up."""
+    if not object_store_reachable():
+        pytest.skip("compose stack (MinIO/ElasticMQ) is not running")
 
 
 def authenticated_client(api_key: str = DEV_API_KEY):

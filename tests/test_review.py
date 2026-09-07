@@ -246,7 +246,16 @@ class TestResolution:
 
 
 class TestReviewApi:
-    """The API surface a reviewer (or a future UI) drives."""
+    """The API surface a reviewer (or a future UI) drives.
+
+    Entering a TestClient runs the app lifespan and ensure_infra(), so this
+    class needs the object store even though its assertions are about Postgres.
+    Without the guard it fails after thirty retries instead of skipping.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _needs_object_store(self, requires_object_store):
+        pass
 
     @pytest.fixture
     def client(self):
