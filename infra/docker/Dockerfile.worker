@@ -7,6 +7,23 @@
 
 FROM python:3.12-slim-bookworm AS base
 
+# Security patch on top of the base image.
+#
+# The base tag is already current — a fresh pull gives these same package
+# versions — but Debian ships point fixes to bookworm-security faster than the
+# python image is rebuilt. Of the 19 critical/high findings in this image,
+# libpcre2 is the only one with a fix published, so it is the only one pinned
+# here. The version is written out rather than a bare `apt-get upgrade` so the
+# build stays reproducible: an unpinned upgrade makes the image contents a
+# function of the build date. When the pin stops resolving, that is the signal
+# to re-run the review, not to drop the pin.
+#
+# CVE-2026-86145 (libpcre2-8-0). Reachability and the other 18 findings:
+# docs/container_cves.md.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libpcre2-8-0=10.42-1+deb12u1 \
+ && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
@@ -26,7 +43,15 @@ COPY apps/worker/pyproject.toml apps/worker/
 RUN uv sync --frozen --no-install-workspace --package docfactory-worker
 
 COPY config/ config/
-COPY packages/ packages/
+# Only the package this image installs. docfactory_evals is the calibration
+# harness — a workspace member, not a dependency of api or worker — and it is
+# the only code in the repo that shells out (subprocess, in calibrate.py).
+# Copying it in shipped a module that was never importable from the venv
+# anyway, so leaving it out costs nothing and removes the one call site that
+# would have made the image's perl findings reachable. Its pyproject.toml is
+# still copied above, because uv needs every workspace member's manifest to
+# resolve the lockfile.
+COPY packages/core/ packages/core/
 COPY apps/ apps/
 
 RUN uv sync --frozen --package docfactory-worker

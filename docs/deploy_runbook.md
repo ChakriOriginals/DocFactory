@@ -220,8 +220,24 @@ aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "$REGISTRY"
 
 cd "$(git rev-parse --show-toplevel)"
+
+# Pull the bases for the TARGET arch first. This is the step that is easy to
+# skip and expensive to skip -- see the note below.
+docker rmi -f python:3.12-slim-bookworm ghcr.io/astral-sh/uv:0.5.11 2>/dev/null || true
+docker pull --platform linux/amd64 python:3.12-slim-bookworm
+docker pull --platform linux/amd64 ghcr.io/astral-sh/uv:0.5.11
+
 docker build --platform linux/amd64 -f infra/docker/Dockerfile.api    -t "$API_REPO:latest" .
 docker build --platform linux/amd64 -f infra/docker/Dockerfile.worker -t "$WORKER_REPO:latest" .
+
+# Assert the arch BEFORE pushing. Do not skip this: it is the only cheap
+# moment to catch a wrong-arch image.
+for repo in "$API_REPO" "$WORKER_REPO"; do
+  arch=$(docker run --rm --entrypoint uname "$repo:latest" -m)
+  [ "$arch" = "x86_64" ] || { echo "WRONG ARCH: $repo is $arch"; exit 1; }
+  echo "OK $repo -> $arch"
+done
+
 docker push "$API_REPO:latest"
 docker push "$WORKER_REPO:latest"
 ```
@@ -229,6 +245,21 @@ docker push "$WORKER_REPO:latest"
 `--platform linux/amd64` is not optional on an Apple Silicon machine: the task
 definitions declare `X86_64`, and an arm64 image lands as `exec format error`
 in a task that starts and dies with no useful log line.
+
+**And `--platform` on `docker build` is not sufficient on its own.** With the
+classic builder, `FROM` is satisfied from whatever is already in the local
+image store, and the store is keyed by tag, not by tag+platform. If an arm64
+`python:3.12-slim-bookworm` is cached -- and one gets cached by any unrelated
+`docker run` or `docker build` without a platform flag -- the build silently
+uses it. Worse, `docker pull --platform linux/amd64` will not fix it either:
+it prints `Image is up to date` and returns 0 without checking that the cached
+image is the wrong platform. Hence the explicit `docker rmi` above.
+
+This was caught the hard way: a rebuild that had worked days earlier failed at
+`COPY --from`, and the apt output in the build log was fetching `arm64` `.deb`
+files under a command that said `--platform linux/amd64`. The failure was
+lucky. The unlucky version of this bug is a build that succeeds and pushes an
+arm64 image, which then fails at task start with `exec format error`.
 
 **Verify** — including that the images really are non-root, which is a claim
 this project makes and should be able to show:
@@ -241,6 +272,10 @@ docker run --rm --entrypoint id "$WORKER_REPO:latest"
 ```
 
 Both `id` calls must print a non-zero uid.
+
+Scan-on-push is enabled, so the push also produces a fresh CVE finding set.
+What the current findings are, which of them are reachable, and which have no
+fix available: `docs/container_cves.md`.
 
 **Rollback**: nothing to undo; pushing a new tag replaces it.
 
