@@ -11,6 +11,14 @@ name_prefix = "docfactory"
 # $7.30 for its two public IPv4s). Off by default; the API task
 # keeps a public IP and `make api-url` finds it. Turn this on for an afternoon
 # when you need a link somebody else can open.
+# Who may reach the API on port 8000 when there is no load balancer. Defaults
+# to the whole internet if you leave this out -- which is easy to do, because
+# nothing prompts you for it. Narrow it to your own address unless you are
+# actively demoing to someone else; a home IP changes, so widen it again when
+# it stops working rather than leaving it open.
+#   api_ingress_cidrs = ["203.0.113.4/32"]
+api_ingress_cidrs = ["0.0.0.0/0"]
+
 enable_alb = false
 
 # The only task that runs on an idle stack. 256/512 is the Fargate floor.
