@@ -152,10 +152,35 @@ jobs:
       - name: Migrate (owner role, before the services roll)
         env:
           CLUSTER: docfactory-dev
+          TAG: ${{ github.sha }}
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
           # Migrations run as a one-off task using the OWNER credentials. The
           # app tasks connect as docfactory_app and hold no DDL rights, so this
           # is the only place schema changes can happen.
+
+          # Register a migrate revision carrying THIS commit's image first.
+          # Terraform registers the family pointing at :latest, and CI only ever
+          # pushes :$TAG -- so running the family as-registered ran whatever
+          # :latest happened to be. `alembic upgrade head` against stale code
+          # reaches that image's head, finds it already applied, and exits 0.
+          # The step went green, the services then rolled to code expecting a
+          # schema that was never migrated, and /healthz kept passing because it
+          # returns a static dict. A green deploy and a broken database.
+          migrate=$(aws ecs describe-task-definition --task-definition docfactory-dev-migrate \
+            --query 'taskDefinition' --output json | python3 -c "
+          import json, os, sys
+          td = json.load(sys.stdin)
+          td['containerDefinitions'][0]['image'] = f\"{os.environ['REGISTRY']}/docfactory-dev-api:{os.environ['TAG']}\"
+          for key in ('taskDefinitionArn','revision','status','requiresAttributes',
+                      'compatibilities','registeredAt','registeredBy'):
+              td.pop(key, None)
+          json.dump(td, sys.stdout)
+          ")
+          migrate_arn=$(aws ecs register-task-definition --cli-input-json "$migrate" \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "migrate task definition -> $migrate_arn"
+
           subnets=$(aws ec2 describe-subnets \
             --filters "Name=tag:Name,Values=docfactory-dev-public-*" \
             --query 'Subnets[].SubnetId' --output text | tr '\t' ',')
@@ -164,7 +189,7 @@ jobs:
             --query 'SecurityGroups[0].GroupId' --output text)
 
           task=$(aws ecs run-task --cluster "$CLUSTER" \
-            --task-definition docfactory-dev-migrate --launch-type FARGATE \
+            --task-definition "$migrate_arn" --launch-type FARGATE \
             --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$group],assignPublicIp=ENABLED}" \
             --query 'tasks[0].taskArn' --output text)
 
@@ -172,7 +197,15 @@ jobs:
           code=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
             --query 'tasks[0].containers[0].exitCode' --output text)
           echo "migration exit code: $code"
-          [ "$code" = "0" ] || { echo "migration failed — not deploying"; exit 1; }
+          if [ "$code" = "None" ]; then
+            # No exit code means the container never ran -- almost always an
+            # image pull failure. Say so, rather than reporting a migration
+            # that failed.
+            aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$task" \
+              --query 'tasks[0].{stopped:stoppedReason,containers:containers[].reason}' --output json
+            echo "migration container never started - not deploying"; exit 1
+          fi
+          [ "$code" = "0" ] || { echo "migration failed - not deploying"; exit 1; }
 
       - name: Roll the services
         env:
@@ -182,6 +215,10 @@ jobs:
         run: |
           for service in api worker; do
             family="docfactory-dev-$service"
+            # Exported BEFORE the substitution below, which reads it. It used to
+            # sit after, so the first iteration died on KeyError: 'SERVICE' and
+            # no service was ever rolled.
+            export SERVICE=$service
             current=$(aws ecs describe-task-definition --task-definition "$family" \
               --query 'taskDefinition' --output json)
             updated=$(echo "$current" | python3 -c "
@@ -194,7 +231,6 @@ jobs:
               td.pop(key, None)
           json.dump(td, sys.stdout)
           " )
-            export SERVICE=$service
             arn=$(aws ecs register-task-definition --cli-input-json "$updated" \
               --query 'taskDefinition.taskDefinitionArn' --output text)
             aws ecs update-service --cluster "$CLUSTER" --service "$family" \

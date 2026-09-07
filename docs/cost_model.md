@@ -97,8 +97,7 @@ destroy the compute layer when the demo is over.
 | **Fargate — API task** | $0.04048/vCPU-hr, $0.004445/GB-hr | **$18.02/mo** (0.5 vCPU + 1 GB, always on) | same; the API does not scale |
 | **Fargate — workers** | as above, $0.024685/task-hr | **$0.00** — `worker_min_count = 0` | $0.148/hr for a full 6-task fan-out, less on Spot |
 | **Public IPv4** | $0.005/hr per address **in use** | **$3.65/mo** for the one API task | +$0.005/hr per running worker |
-| **CloudWatch composite alarm** | $0.50/alarm-mo | **$0.50/mo** | same |
-| **CloudWatch metric alarms** | first 10 free | **$0.00** (5 in use) | same |
+| **CloudWatch metric alarms** | first 10 free | **$0.00** (8 alarm metrics in use) | same |
 | **CloudWatch Logs** | $0.50/GB ingest, $0.03/GB-mo | pennies at 7-day retention | scales with worker output |
 
 ### Billed while the data layer exists

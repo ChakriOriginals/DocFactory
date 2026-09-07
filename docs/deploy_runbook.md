@@ -502,8 +502,8 @@ watch -n 20 "aws ecs describe-services --cluster $CLUSTER \
 Expect roughly: backlog visible within a minute → the
 `docfactory-dev-extract-backlog` alarm fires → desired count steps to 1, then 3,
 then the maximum by backlog size → the queue drains → five minutes of an empty
-queue **and** nothing in flight → the composite `docfactory-dev-worker-idle`
-alarm fires → back to 0.
+queue **and** nothing in flight → the `docfactory-dev-worker-idle` alarm
+fires → back to 0.
 
 **The screenshot.** CloudWatch → Metrics → All metrics → SQS → Queue Metrics →
 `docfactory-dev-extract` → `ApproximateNumberOfMessagesVisible`. Add a second
@@ -514,8 +514,9 @@ to zero — is the picture. Take it after the fleet has returned to 0, so the
 whole shape is in frame.
 
 Also screenshot the alarm history: CloudWatch → Alarms → `docfactory-dev-worker-idle`
-→ History. It shows the composite alarm transitioning, which is the part of the
-design that makes scale-to-zero safe.
+→ History. It is a metric-math alarm over `visible + inflight`; watching it go
+OK → ALARM as the last message clears is the part of the design that makes
+scale-to-zero safe.
 
 **Rollback**: nothing. It scales itself back down; that is the point.
 
@@ -811,7 +812,7 @@ stack is **~$13.27/month**, down from ~$36; parked is $0.61.
 | Public IPv4 | **$3.65/mo** while a task runs | $0.005/hr per in-use address since Feb 2024. Unavoidable with no NAT gateway; charged per task-hour, so parking removes it. |
 | ALB | **$0** by default | `enable_alb = false`; the task's public IP is the endpoint (`make api-url`). Turn it on for ~$16.43/mo when you need a stable hostname. |
 | SSM Parameter Store | **$0.00** | Three SecureString parameters, Standard tier. Replaced Secrets Manager's $1.20/mo. |
-| CloudWatch composite alarm | $0.50/mo | Not in the free tier; the metric alarms are. |
+| CloudWatch alarms | **$0.00** | Eight alarm metrics across both planes (3 DLQ + billing + backlog + worker-idle's two + dead man's switch); the first ten are free. Metric math is billed per referenced metric, so worker-idle counts as two — still free, and $0.50/mo cheaper than the composite alarm it replaced. |
 | Fargate — workers | **$0** idle | Zero when idle, and on Spot (~70% off) when not. |
 
 Parked with `make aws-park` (all tasks at 0): **~$0.61/mo**. Compute destroyed,

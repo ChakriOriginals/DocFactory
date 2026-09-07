@@ -92,7 +92,15 @@ class Settings(BaseSettings):
     ingest_prefix: str = "dropbox"
     # Shared secret for the local MinIO -> API notification bridge. On AWS,
     # S3 delivers to SQS directly and this is unused.
-    ingest_webhook_token: str = "local-ingest-token"
+    #
+    # DEFAULTS EMPTY, AND THAT IS THE POINT. The bridge endpoint is exempt from
+    # API-key auth -- its caller is the object store, which has no tenant -- so
+    # this string is the only thing standing in front of a route that puts its
+    # body straight onto the ingest queue. A committed default is a shared
+    # secret that is not secret, and this repository is public. Empty makes the
+    # endpoint fail closed everywhere it is not deliberately configured, which
+    # on AWS is everywhere. Local dev sets it in .env (see .env.example).
+    ingest_webhook_token: str = ""
     # Notification target for object-created events. Locally MinIO's webhook
     # target (arn:minio:sqs::PRIMARY:webhook), which posts to the API bridge;
     # on AWS the ingest queue's own ARN, and no bridge is deployed. Empty

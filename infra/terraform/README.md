@@ -79,10 +79,17 @@ inside the VPC, and this stack has no VPC-private data plane to speak of.
 zero on a raw queue metric — "messages per task" is undefined at zero tasks, so
 the fleet parks at one task forever, a permanent ~$9/month on an idle stack.
 Step scaling on `ApproximateNumberOfMessagesVisible` fires whether or not
-anything is running, so 0 → 1 works. Scale-in is a *composite* alarm requiring
-an empty queue **and** nothing in flight for five minutes, because a queue can
-read empty while a worker is mid-document and killing that worker would
-redeliver the message and waste a model call already paid for.
+anything is running, so 0 → 1 works. Scale-in requires an empty queue **and**
+nothing in flight for five minutes, because a queue can read empty while a
+worker is mid-document and killing that worker would redeliver the message and
+waste a model call already paid for.
+
+That condition is one *metric-math* alarm (`visible + inflight < 1`), not a
+composite alarm over two. A composite alarm cannot invoke an Application Auto
+Scaling policy — CloudWatch only accepts SNS, Lambda and OpsItem actions there
+— and, separately, step bounds are offsets from the triggering alarm's
+threshold, which a composite alarm does not have. Metric math gives the policy
+a number to offset from, and costs $0.50/month less.
 
 **The documents bucket is outside the destroy blast radius.** `destroy` fails
 loudly on a non-empty bucket unless `force_destroy_documents = true`. Compute is

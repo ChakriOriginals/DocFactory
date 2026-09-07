@@ -78,9 +78,18 @@ variable "api_ingress_cidrs" {
     traffic from the load balancer's security group and from nothing else.
 
     Defaults to the whole internet because a demo URL you cannot reach is not a
-    demo. Every route except /healthz requires an API key, so this is exposure
-    rather than access — but narrowing it to your own address costs nothing:
+    demo. Narrowing it to your own address costs nothing, and is the right
+    setting for anything but a live demo:
       api_ingress_cidrs = ["203.0.113.4/32"]
+
+    This used to claim "every route except /healthz requires an API key, so
+    this is exposure rather than access". That was false. Six paths are exempt
+    in apps/api/docfactory_api/main.py, and one of them --
+    /internal/storage-events -- puts its request body onto the ingest queue. It
+    carries its own shared secret, which now defaults to empty so the route
+    fails closed, but the general point stands: an open CIDR is only as safe as
+    the auth on the least-protected route behind it, and that list changes as
+    the app grows. Check it against _UNAUTHENTICATED_PATHS before widening.
   EOT
   type        = list(string)
   default     = ["0.0.0.0/0"]

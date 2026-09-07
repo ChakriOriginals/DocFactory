@@ -103,45 +103,68 @@ resource "aws_cloudwatch_metric_alarm" "backlog" {
 }
 
 # Queue empty AND nothing in flight, for five straight minutes -> back to zero.
-# The composite alarm is what makes scale-to-zero safe: a queue can read empty
-# while a worker is mid-document, and killing that worker would redeliver the
-# message and waste the model call already paid for.
-resource "aws_cloudwatch_metric_alarm" "idle_visible" {
-  alarm_name          = "${local.name}-extract-idle-visible"
-  namespace           = "AWS/SQS"
-  metric_name         = "ApproximateNumberOfMessagesVisible"
-  statistic           = "Maximum"
-  period              = 60
-  evaluation_periods  = 5
-  threshold           = 1
-  comparison_operator = "LessThanThreshold"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = { QueueName = local.data_plane.queue_names.extract }
-}
-
-resource "aws_cloudwatch_metric_alarm" "idle_in_flight" {
-  alarm_name          = "${local.name}-extract-idle-in-flight"
-  namespace           = "AWS/SQS"
-  metric_name         = "ApproximateNumberOfMessagesNotVisible"
-  statistic           = "Maximum"
-  period              = 60
-  evaluation_periods  = 5
-  threshold           = 1
-  comparison_operator = "LessThanThreshold"
-  treat_missing_data  = "notBreaching"
-
-  dimensions = { QueueName = local.data_plane.queue_names.extract }
-}
-
-resource "aws_cloudwatch_composite_alarm" "worker_idle" {
+# Both halves matter: a queue can read empty while a worker is mid-document, and
+# killing that worker redelivers the message and wastes a model call already
+# paid for.
+#
+# One metric-math alarm rather than two alarms behind a composite, for two
+# independent reasons -- the first fails the apply, the second would have failed
+# silently afterwards:
+#
+#   1. PutCompositeAlarm does not accept an Application Auto Scaling policy ARN.
+#      Composite alarms may notify SNS, invoke Lambda, or open an OpsItem; only
+#      PutMetricAlarm takes a scalingPolicy action. Same class as the us-east-1
+#      alarm pointed at a us-east-2 topic: an action AWS will not honour, that
+#      survives validate and plan and dies at apply.
+#
+#   2. Step bounds are offsets from the TRIGGERING ALARM'S THRESHOLD, and a
+#      composite alarm has no metric and no threshold to offset from. Even if
+#      the ARN were accepted, Application Auto Scaling would have no value to
+#      place against scale-in's single (-inf, 0] step and nothing would happen.
+#      dead_mans_switch.tf:45 already reasons this out for its own policy; the
+#      same reasoning was never applied here.
+#
+# The arithmetic is unchanged. total = visible + inflight; with threshold 1 and
+# total 0 the offset is -1, which lands in (-inf, 0] and selects
+# worker_min_count -- exactly what the composite was meant to express. It is
+# also $0.50/month cheaper, which is the same trade dlq_alarms.tf already made.
+resource "aws_cloudwatch_metric_alarm" "worker_idle" {
   alarm_name        = "${local.name}-worker-idle"
   alarm_description = "Nothing waiting and nothing in flight: release the fleet."
 
-  alarm_rule = join(" AND ", [
-    "ALARM(${aws_cloudwatch_metric_alarm.idle_visible.alarm_name})",
-    "ALARM(${aws_cloudwatch_metric_alarm.idle_in_flight.alarm_name})",
-  ])
+  comparison_operator = "LessThanThreshold"
+  threshold           = 1
+  evaluation_periods  = 5
+  treat_missing_data  = "notBreaching"
+
+  metric_query {
+    id          = "total"
+    expression  = "visible + inflight"
+    label       = "Extract queue: waiting plus in flight"
+    return_data = true
+  }
+
+  metric_query {
+    id = "visible"
+    metric {
+      namespace   = "AWS/SQS"
+      metric_name = "ApproximateNumberOfMessagesVisible"
+      period      = 60
+      stat        = "Maximum"
+      dimensions  = { QueueName = local.data_plane.queue_names.extract }
+    }
+  }
+
+  metric_query {
+    id = "inflight"
+    metric {
+      namespace   = "AWS/SQS"
+      metric_name = "ApproximateNumberOfMessagesNotVisible"
+      period      = 60
+      stat        = "Maximum"
+      dimensions  = { QueueName = local.data_plane.queue_names.extract }
+    }
+  }
 
   alarm_actions = [aws_appautoscaling_policy.worker_scale_in.arn]
 }

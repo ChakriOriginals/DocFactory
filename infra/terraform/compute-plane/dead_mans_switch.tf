@@ -1,7 +1,7 @@
 # The dead man's switch.
 #
 # The queue-depth autoscaling in autoscaling.tf is the normal mechanism: a
-# composite alarm sees an empty queue and nothing in flight for five minutes
+# metric-math alarm sees an empty queue and nothing in flight for five minutes
 # and releases the fleet. This is the backstop for when that mechanism is the
 # thing that is broken — a misconfigured alarm, a scaling policy that was
 # edited, an SQS metric that stopped publishing — and the fleet sits at N tasks
