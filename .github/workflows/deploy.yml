@@ -124,7 +124,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: eval-gate
     # Pull requests stop at the gate. Only main deploys.
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    #
+    # AWS_DEPLOY_ROLE_ARN gates the job rather than failing it. Without the
+    # variable, configure-aws-credentials gets an empty role-to-assume and dies
+    # with an unhelpful error -- so a fork, or this repo before the OIDC role
+    # exists, shows a red X for infrastructure it was never expected to have.
+    # Skipped is the honest state, and it keeps the badge on a public repo
+    # meaningful.
+    if: >-
+      github.ref == 'refs/heads/main'
+      && github.event_name != 'pull_request'
+      && vars.AWS_DEPLOY_ROLE_ARN != ''
     environment: dev
     steps:
       - uses: actions/checkout@v4
