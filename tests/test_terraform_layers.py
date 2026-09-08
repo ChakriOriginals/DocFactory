@@ -411,3 +411,64 @@ def test_the_two_budgets_do_not_measure_the_same_thing() -> None:
         "(money owed) and the other exclude them (consumption); with both the "
         "same, one of the two questions has no alarm at all."
     )
+
+
+# --- Data safety: two defaults that quietly destroyed things -----------------
+
+QUEUES_TF = DATA_PLANE / "queues.tf"
+STORAGE_TF = DATA_PLANE / "storage.tf"
+
+
+def test_live_queues_retain_at_least_as_long_as_their_dlqs() -> None:
+    """The asymmetry is what hid the bug.
+
+    The DLQs were given 14 days deliberately ("long enough to actually look").
+    The live queues were left unset, which means the SQS default of 4 days — so
+    the failure path outlived the path carrying real work by ten days. Parking
+    the compute plane over a long weekend silently destroyed anything queued:
+    no error, no DLQ entry, no alarm.
+    """
+    src = _strip_comments(QUEUES_TF.read_text())
+    retentions = [int(m) for m in re.findall(r"message_retention_seconds\s*=\s*(\d+)", src)]
+    assert len(retentions) >= 2, (
+        "Expected an explicit message_retention_seconds on both the DLQs and the "
+        "live queues. An unset one means the AWS default of 4 days."
+    )
+    assert len(set(retentions)) == 1, (
+        f"Live queues and DLQs now retain for different periods ({sorted(set(retentions))}). "
+        "If the live queues are the shorter of the two, work is destroyed while "
+        "the record of failures is kept — which is exactly backwards."
+    )
+
+
+def test_the_bucket_lifecycle_does_not_expire_live_documents_by_default() -> None:
+    """Housekeeping is safe to default. Deleting client data is not.
+
+    Retention is a contract term. A guessed default destroys the documents a
+    client paid to have processed, and nothing would alarm.
+    """
+    variables = (DATA_PLANE / "variables.tf").read_text()
+    match = re.search(
+        r'variable\s+"document_retention_days".*?default\s*=\s*(\d+)', variables, re.DOTALL
+    )
+    assert match, "document_retention_days is no longer declared with a default"
+    assert int(match.group(1)) == 0, (
+        f"document_retention_days now defaults to {match.group(1)}. Any non-zero "
+        "default deletes client documents on a guess."
+    )
+
+
+def test_versioning_is_paired_with_a_noncurrent_expiry() -> None:
+    """Versioning without a lifecycle keeps every version forever, invisibly.
+
+    Superseded versions do not appear in the console's object listing and bill
+    anyway — and a deletion request cannot be honoured while they exist.
+    """
+    storage = _strip_comments(STORAGE_TF.read_text())
+    if "aws_s3_bucket_versioning" not in storage:
+        pytest.skip("bucket is not versioned, so there is no version tail to reclaim")
+    assert "noncurrent_version_expiration" in storage, (
+        "The bucket is versioned but nothing expires noncurrent versions. Every "
+        "overwrite and every delete leaves bytes that bill forever and that a "
+        "deletion request cannot remove."
+    )

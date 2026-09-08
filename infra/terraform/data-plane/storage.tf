@@ -52,6 +52,56 @@ resource "aws_s3_bucket_versioning" "documents" {
   }
 }
 
+# Versioning with no lifecycle keeps every version of every object forever.
+#
+# That is two problems wearing one hat. The cost one is mild and obvious:
+# superseded versions and abandoned multipart uploads are invisible in the
+# console's object list and bill anyway. The other is not about cost at all —
+# a client who asks you to delete their documents cannot be told yes, because
+# deleting an object under versioning writes a delete marker and keeps every
+# prior version indefinitely.
+#
+# What this deliberately does NOT do is expire live documents. How long a
+# client's data is kept is a contract term, not an infrastructure default, and
+# guessing it wrong destroys the thing the client paid to have processed. The
+# knob exists (document_retention_days) and defaults to 0, meaning keep.
+resource "aws_s3_bucket_lifecycle_configuration" "documents" {
+  bucket = aws_s3_bucket.documents.id
+
+  # Housekeeping only: this rule cannot touch a current object.
+  rule {
+    id     = "reclaim-superseded-and-abandoned"
+    status = "Enabled"
+
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.noncurrent_version_retention_days
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  # Off unless a retention term is actually agreed. Deleting a client's
+  # documents on a default would be worse than keeping them on one.
+  dynamic "rule" {
+    for_each = var.document_retention_days > 0 ? [1] : []
+
+    content {
+      id     = "expire-documents"
+      status = "Enabled"
+
+      filter {}
+
+      expiration {
+        days = var.document_retention_days
+      }
+    }
+  }
+}
+
 # Batch ingestion. The filter matches the drop prefix the code already routes
 # on ({tenant}/dropbox/...), so the pipeline's own artifacts — incoming
 # uploads and parsed text — never re-trigger ingestion.

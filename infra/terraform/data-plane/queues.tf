@@ -32,6 +32,18 @@ resource "aws_sqs_queue" "main" {
   visibility_timeout_seconds = each.value.visibility
   receive_wait_time_seconds  = 10 # long polling: fewer empty receives, lower cost
 
+  # 14 days, matching the DLQs, because the default is 4 and the park destroys
+  # the workers.
+  #
+  # The DLQs got a deliberate 14 ("long enough to actually look") and the live
+  # queues were left unset, which means the AWS default of 4 days. So the
+  # FAILURE path was preserved for a fortnight while the path carrying real
+  # work was preserved for a long weekend. Park on a Thursday, come back the
+  # following Wednesday, and any document queued at park time is gone — no
+  # error, no DLQ entry, no alarm. SQS bills per request, not per message-day,
+  # so the shorter window bought nothing.
+  message_retention_seconds = 1209600
+
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.dlq[each.key].arn
     maxReceiveCount     = local.max_receive_count

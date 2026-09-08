@@ -241,3 +241,46 @@ variable "ecr_image_retention_count" {
     error_message = "Keep at least 2 images: a rollback needs the previous image to still exist."
   }
 }
+
+variable "noncurrent_version_retention_days" {
+  description = <<-EOT
+    How long a superseded object version survives after being replaced.
+
+    The bucket is versioned, so every overwrite leaves the old bytes behind and
+    every delete leaves a delete marker over a version that still exists and
+    still bills. Without this rule that history is unbounded and invisible —
+    it does not appear in the console's object listing.
+
+    30 days is long enough to undo a mistake and short enough that the tail
+    does not grow forever. It cannot delete a current object.
+  EOT
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.noncurrent_version_retention_days >= 1
+    error_message = "Keep at least a day of version history; the point is to be able to undo."
+  }
+}
+
+variable "document_retention_days" {
+  description = <<-EOT
+    Days to keep a client's documents before deleting them. 0 = keep forever.
+
+    Deliberately 0. Retention is a contract term and the safe default is to
+    keep: a too-short guess destroys the documents a client paid to have
+    processed, and no alarm would fire. Set it when a client's agreement says
+    a number, not before.
+
+    Note this expires objects in S3 only. Rows in `documents` and `extractions`
+    are not touched, so a real deletion request needs both — there is no
+    delete endpoint yet, which is tracked separately.
+  EOT
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.document_retention_days == 0 || var.document_retention_days >= 7
+    error_message = "Use 0 to keep documents, or at least 7 days. Anything shorter is almost certainly a typo."
+  }
+}
