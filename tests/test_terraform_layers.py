@@ -292,3 +292,58 @@ def test_the_runbook_passes_park_when_it_parks() -> None:
         "following it reports the data layer as orphans and tells the operator "
         "to delete it."
     )
+
+
+# --- A push while the stack is parked must not build anything ----------------
+
+
+def _deploy_steps() -> list[dict]:
+    yaml = pytest.importorskip("yaml")
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    return workflow["jobs"]["build-and-deploy"]["steps"]
+
+
+def test_the_parked_check_runs_before_anything_is_built() -> None:
+    """Ordering is the whole point, not just the presence of a check.
+
+    Parking is `terraform destroy` in compute-plane/, and a push while parked is
+    normal. Before the gate, such a run built both images, pushed them,
+    registered a migrate task definition, and only then failed on
+    ClusterNotFoundException. The images are the real damage: pushed against a
+    retention of 5, a couple of parked runs evict the images a rollback needs.
+    """
+    steps = _deploy_steps()
+    ids = [s.get("id") or s.get("name", "") for s in steps]
+
+    gate = next((i for i, s in enumerate(steps) if s.get("id") == "cluster"), None)
+    assert gate is not None, (
+        "The deploy job no longer checks whether the compute plane is up. A push "
+        "while parked will build and push images for a cluster that does not "
+        "exist, then fail on ClusterNotFoundException."
+    )
+
+    build = next((i for i, n in enumerate(ids) if "Build and push" in str(n)), None)
+    assert build is not None, "the build step was renamed; update this test"
+    assert gate < build, (
+        f"The parked-state check (index {gate}) must run BEFORE the build "
+        f"(index {build}). Building first spends CI time and ECR retention "
+        "budget on a stack that does not exist."
+    )
+
+
+def test_every_cluster_touching_step_is_gated_on_the_check() -> None:
+    steps = _deploy_steps()
+    gate = "steps.cluster.outputs.up"
+    ungated = [
+        s.get("name") or s.get("id") or s.get("uses")
+        for s in steps
+        if any(
+            k in str(s.get("name", ""))
+            for k in ("Build and push", "Migrate", "Roll the", "stabilise")
+        )
+        and gate not in str(s.get("if", ""))
+    ]
+    assert not ungated, (
+        f"These steps touch the cluster but are not gated on the parked check: "
+        f"{ungated}. They will run against a destroyed cluster."
+    )

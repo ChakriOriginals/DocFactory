@@ -145,10 +145,60 @@ jobs:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # Parking the stack -- `terraform destroy` in compute-plane/ -- is a normal
+      # overnight operation, and a push while parked is not an error. Without
+      # this gate the run built both images, pushed them, registered a migrate
+      # task definition and only then died on ClusterNotFoundException: "The
+      # referenced cluster was inactive", which does not tell you that you
+      # parked it.
+      #
+      # The check runs BEFORE the build, not just before the deploy. A parked
+      # run that still pushes images spends the ECR retention budget on a stack
+      # that does not exist, and at a retention of 5 that evicts images a real
+      # rollback would have needed.
+      - id: cluster
+        name: Is the compute plane up, or parked?
+        run: |
+          cluster_status=$(aws ecs describe-clusters --clusters "$CLUSTER" --region "$AWS_REGION" \
+            --query 'clusters[0].status' --output text 2>/dev/null || echo NONE)
+          # A cluster that never existed comes back as None with a failures
+          # entry, a destroyed one as INACTIVE. Neither is a deployable target.
+          if [ "$cluster_status" = "ACTIVE" ]; then
+            echo "up=true" >> "$GITHUB_OUTPUT"
+            echo "Cluster $CLUSTER is ACTIVE; deploying."
+          else
+            echo "up=false" >> "$GITHUB_OUTPUT"
+            echo "Cluster $CLUSTER status: $cluster_status — the compute plane is parked."
+            {
+              echo "### Deploy skipped — the compute plane is parked"
+              echo
+              echo "\`$CLUSTER\` is **$cluster_status**, so there is nothing to deploy to."
+              echo "This is not a failure: parking is \`terraform destroy\` in"
+              echo "\`infra/terraform/compute-plane/\`, and it is the normal way to"
+              echo "stop paying for an idle stack."
+              echo
+              echo "Images were **not** built or pushed, deliberately — a parked run"
+              echo "that pushes anyway spends the ECR retention budget on a stack that"
+              echo "does not exist."
+              echo
+              echo "To bring it back:"
+              echo
+              echo '```bash'
+              echo "cd infra/terraform/compute-plane && terraform apply"
+              echo '```'
+              echo
+              echo "Then re-run this workflow, or push again."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        env:
+          CLUSTER: docfactory-dev
+
       - id: ecr
+        if: steps.cluster.outputs.up == 'true'
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push
+        if: steps.cluster.outputs.up == 'true'
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
           TAG: ${{ github.sha }}
@@ -170,6 +220,7 @@ jobs:
           done
 
       - name: Migrate (owner role, before the services roll)
+        if: steps.cluster.outputs.up == 'true'
         env:
           CLUSTER: docfactory-dev
           TAG: ${{ github.sha }}
@@ -228,6 +279,7 @@ jobs:
           [ "$code" = "0" ] || { echo "migration failed - not deploying"; exit 1; }
 
       - name: Roll the services
+        if: steps.cluster.outputs.up == 'true'
         env:
           CLUSTER: docfactory-dev
           TAG: ${{ github.sha }}
@@ -259,6 +311,7 @@ jobs:
           done
 
       - name: Wait for the API to stabilise
+        if: steps.cluster.outputs.up == 'true'
         run: |
           aws ecs wait services-stable --cluster docfactory-dev --services docfactory-dev-api
           echo "deployed"
