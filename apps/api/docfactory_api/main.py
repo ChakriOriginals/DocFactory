@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import BinaryIO, Literal
 
 from docfactory_core.auth import AuthError, resolve_tenant
-from docfactory_core.backpressure import check_rate_limit, in_flight
+from docfactory_core.backpressure import check_rate_limit, in_flight, status_counts
 from docfactory_core.backpressure import queue_depth as broker_queue_depth
 from docfactory_core.bootstrap import ensure_infra
 from docfactory_core.budget import budget_state
@@ -44,7 +44,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 from opentelemetry import trace
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 log = logging.getLogger(__name__)
@@ -216,6 +216,31 @@ class DocumentView(BaseModel):
     extraction: ExtractionView | None
 
 
+class DocumentListEntry(BaseModel):
+    """One row of a document listing.
+
+    Deliberately not DocumentView: that carries the latest extraction, which
+    would mean a join per row for a field nobody reconciling a list needs.
+    Fetch the detail endpoint for the ones that matter.
+    """
+
+    document_id: uuid.UUID
+    doc_type: str
+    status: str
+    text_chars: int | None
+    last_error: str | None
+    received_at: datetime
+
+
+class DocumentPage(BaseModel):
+    documents: list[DocumentListEntry]
+    # Total matching the filter, not the page — the number a client is
+    # reconciling against.
+    total: int
+    limit: int
+    offset: int
+
+
 class UsageRollup(BaseModel):
     """What a document type costs to process, from recorded usage."""
 
@@ -259,6 +284,15 @@ class SpendSummary(BaseModel):
     queue_depth: dict[str, int]
     # Per document type. Empty until a tenant has processed anything.
     drift: list[DriftView]
+    # Every status this tenant holds, and how many.
+    #
+    # `needs_ocr` is why this exists. It is terminal and produces nothing — a
+    # scanned PDF is accepted with a 202 and then stops, with no extraction, no
+    # review task, no DLQ message and no alarm. That is correct behaviour, and
+    # it was also completely invisible: a client could only discover it by
+    # reconciling their own totals and finding documents that never came back.
+    # Roughly a quarter of the synthetic corpus lands there.
+    status_counts: dict[str, int]
 
 
 class ReviewTaskSummary(BaseModel):
@@ -437,6 +471,7 @@ def get_usage() -> SpendSummary:
         remaining_usd=float(state.remaining_usd),
         exceeded=state.exceeded,
         in_flight=in_flight(tenant_id),
+        status_counts=status_counts(tenant_id),
         queue_depth={
             queue: broker_queue_depth(app.state.broker, queue)
             for queue in (
@@ -470,6 +505,80 @@ def get_usage() -> SpendSummary:
             for row in unit_costs(tenant_id)
         ],
     )
+
+
+@app.get("/documents", response_model=DocumentPage)
+def list_documents(
+    status: str | None = None,
+    doc_type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> DocumentPage:
+    """List this tenant's documents, newest first.
+
+    THE GAP THIS CLOSES. There was no way to list documents at all — only
+    `GET /documents/{id}`, which needs an id the client has to have kept. So a
+    document that finished in a state producing no output, `needs_ocr` above
+    all, was undiscoverable except by reconciling totals: you know you sent
+    500, you can count 497 that came back, and nothing tells you which three
+    did not or why.
+
+    `?status=needs_ocr` answers that directly, and the status_counts field on
+    /usage says how big the number is before you go looking.
+
+    RLS scopes the query, so this cannot return another tenant's rows even if
+    the filters were wrong.
+    """
+    if limit < 1 or limit > 200:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 200")
+    if offset < 0:
+        raise HTTPException(status_code=422, detail="offset must not be negative")
+
+    valid = {item.value for item in DocumentStatus}
+    if status is not None and status not in valid:
+        # Naming the valid set matters here: the states are the product's
+        # vocabulary, and a client filtering for a state that cannot exist
+        # would otherwise read an empty page as "nothing is stuck".
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown status {status!r}; valid statuses are {sorted(valid)}",
+        )
+
+    with session_scope() as session:
+        conditions = []
+        if status is not None:
+            conditions.append(Document.status == status)
+        if doc_type is not None:
+            conditions.append(Document.doc_type == doc_type)
+
+        total = int(
+            session.scalar(select(func.count()).select_from(Document).where(*conditions)) or 0
+        )
+        rows = list(
+            session.scalars(
+                select(Document)
+                .where(*conditions)
+                .order_by(Document.received_at.desc())
+                .limit(limit)
+                .offset(offset)
+            ).all()
+        )
+        return DocumentPage(
+            documents=[
+                DocumentListEntry(
+                    document_id=row.id,
+                    doc_type=row.doc_type,
+                    status=row.status,
+                    text_chars=row.text_chars,
+                    last_error=row.last_error,
+                    received_at=row.received_at,
+                )
+                for row in rows
+            ],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
 
 
 @app.get("/documents/{document_id}", response_model=DocumentView)

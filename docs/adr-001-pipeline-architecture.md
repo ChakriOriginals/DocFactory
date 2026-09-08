@@ -45,6 +45,22 @@ tier), so those documents transition to `needs_ocr` — they never retry, never
 DLQ, never alarm. Failure states must mean "something went wrong", or they
 become noise nobody reads.
 
+*Amended.* All of that is right, and for a long time it was also the whole
+argument — which quietly turned "not a failure" into "not visible". A document
+in this state produced no extraction, no review task, no queue message and no
+alarm, and there was no endpoint that listed documents, only lookup by an id
+the caller had kept. So the only way to learn that roughly a quarter of a batch
+had produced nothing was to reconcile your own totals against ours and find the
+gap. Correctly declining to answer still owes the client an answer about how
+often it happened: `/usage` now carries a `status_counts` breakdown, and
+`GET /documents?status=needs_ocr` lists them.
+
+A review task is deliberately *not* created. `ReviewTask.extraction_id` is
+NOT NULL and a needs_ocr document has no extraction; making one fit would mean
+fabricating an empty row that then flows into unit costs, drift baselines and
+the eval corpus. The review queue is for correcting an extraction, and there is
+nothing here to correct — the document needs a feature, not a reviewer.
+
 **Mock-mode LLM is mandatory and default.** `MODEL_PROVIDER=mock` serves
 schema-valid heuristic extractions with simulated latency and no network.
 Tests, CI, and bulk runs can exercise the entire pipeline — including the

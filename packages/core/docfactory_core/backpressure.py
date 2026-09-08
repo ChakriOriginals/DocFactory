@@ -121,6 +121,29 @@ def in_flight(tenant_id: str) -> int:
         )
 
 
+def status_counts(tenant_id: str) -> dict[str, int]:
+    """Every document status this tenant holds, and how many.
+
+    Exists because `needs_ocr` is terminal and silent. A scanned PDF is
+    accepted with a 202, transitions to `needs_ocr`, and stops: no extraction,
+    no review task, no DLQ message, no alarm. Nothing is wrong from the
+    pipeline's point of view — there was no text layer, and inventing an answer
+    would be worse — but the client polls one document at a time by an id they
+    have to have kept, so the only way to discover the size of the hole is to
+    reconcile their own totals and find the gap.
+
+    On the synthetic corpus roughly a quarter of documents land there, and a
+    scanned-paper client's real rate will be higher.
+
+    RLS-scoped like every other count here, so a tenant sees only their own.
+    """
+    with session_scope(tenant_id) as session:
+        rows = session.execute(
+            text("SELECT status, COUNT(*) AS n FROM documents GROUP BY status")
+        ).all()
+    return {row.status: int(row.n) for row in rows}
+
+
 def admits(tenant_id: str, *, exclude_document: str | None = None) -> bool:
     """Whether this tenant is under its in-flight ceiling.
 
