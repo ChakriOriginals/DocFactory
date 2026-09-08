@@ -20,11 +20,26 @@
 # because the reference does not exist in that direction. Order is: apply data,
 # apply compute; destroy compute, destroy data.
 
+# Reads the data layer's state from S3, matching that layer's backend.
+#
+# This used to read a LOCAL path, ../data-plane/terraform.tfstate. Moving the
+# data layer to a remote backend broke it immediately and loudly:
+#
+#   Error: Unable to find remote state
+#   Plan: 15 to add   <- against an empty data layer
+#
+# It fails closed, which is the only reason this was a five-minute fix rather
+# than an outage: the plan errors instead of quietly resolving every
+# `local.data_plane.*` to null and building a compute layer wired to nothing.
+# If this ever reads a stale local file again, that is the failure mode to
+# expect — a plan that wants to create everything.
 data "terraform_remote_state" "data_plane" {
-  backend = "local"
+  backend = "s3"
 
   config = {
-    path = "${path.module}/../data-plane/terraform.tfstate"
+    bucket = "docfactory-tfstate-215472107457"
+    key    = "data-plane/terraform.tfstate"
+    region = "us-east-2"
   }
 }
 

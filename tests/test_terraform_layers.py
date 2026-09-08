@@ -472,3 +472,48 @@ def test_versioning_is_paired_with_a_noncurrent_expiry() -> None:
         "overwrite and every delete leaves bytes that bill forever and that a "
         "deletion request cannot remove."
     )
+
+
+# --- State lives off this laptop, and the cross-layer read must follow it ----
+
+
+def test_both_layers_use_a_remote_backend() -> None:
+    """Local state was a single point of failure holding cleartext passwords.
+
+    Losing the machine meant losing the ability to manage OR destroy a running
+    stack: Terraform would no longer know any resource existed, `destroy` would
+    report nothing to do, and everything would keep billing with no inventory
+    of what to delete by hand.
+    """
+    for layer in (DATA_PLANE, COMPUTE_PLANE):
+        backend = layer / "backend.tf"
+        assert backend.is_file(), f"{layer.name} has no backend.tf; state is local again"
+        src = _strip_comments(backend.read_text())
+        assert 'backend "s3"' in src, f"{layer.name} is not using the S3 backend"
+        assert "encrypt" in src, f"{layer.name} state is not encrypted at rest"
+
+
+def test_the_cross_layer_read_points_at_the_same_place_the_state_lives() -> None:
+    """The failure this catches is silent-ish and was hit for real.
+
+    compute-plane reads data-plane's outputs through terraform_remote_state.
+    That used to be a local file path; moving data-plane to S3 left it reading
+    a file that no longer existed, and the plan wanted to build 15 resources
+    against a data layer resolved to nothing. It fails closed — but only
+    because the data source errors, not because anything checks agreement.
+    """
+    compute = _strip_comments((COMPUTE_PLANE / "data_plane.tf").read_text())
+    assert 'backend = "s3"' in compute, (
+        "compute-plane reads the data layer's state from somewhere other than "
+        "S3, but the data layer's state is in S3. A local path here resolves "
+        "every local.data_plane.* against a file that is not the real state."
+    )
+
+    data_backend = _strip_comments((DATA_PLANE / "backend.tf").read_text())
+    bucket = re.search(r'bucket\s*=\s*"([^"]+)"', data_backend)
+    read_bucket = re.search(r'bucket\s*=\s*"([^"]+)"', compute)
+    assert bucket and read_bucket, "could not find a bucket on both sides"
+    assert bucket.group(1) == read_bucket.group(1), (
+        f"compute-plane reads state from {read_bucket.group(1)} but data-plane "
+        f"writes it to {bucket.group(1)}."
+    )
