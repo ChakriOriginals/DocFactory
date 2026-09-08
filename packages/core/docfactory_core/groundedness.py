@@ -67,3 +67,15 @@ def groundedness(value: str, source_text: str) -> float:
 
 def is_grounded(value: str, source_text: str, threshold: float = GROUNDEDNESS_THRESHOLD) -> bool:
     return groundedness(value, source_text) >= threshold
+
+
+def squash_for_matching(value: str) -> str:
+    """Public form of `_squash`, for callers matching short literal tokens.
+
+    A currency symbol is routinely separated from its amount by the text
+    extractor — "€" and "1.234,00" arrive as different runs — so a literal
+    `in` test against the raw text misses forms that are plainly present.
+    Deleting whitespace rather than collapsing it is what rejoins them, the
+    same reasoning `_squash` was written for.
+    """
+    return _squash(value)

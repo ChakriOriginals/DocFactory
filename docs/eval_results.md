@@ -1,6 +1,6 @@
 # Eval results — field accuracy on the golden set
 
-- date: 2026-08-18
+- date: 2026-09-08
 - provider/model: `mock:mock-extractor-v1` · small tier: `mock:mock-extractor-small-v1`
 - costs are the models' published per-token rates applied to the tokens each call actually used
 
@@ -47,7 +47,7 @@
 
 
 - escalated: 47 of 74 digital docs (63.5%)
-- cost per document: **$0.008942 routed** vs $0.010077 single-model — **11.3% cheaper** (routed spend is 0.89x the single-model spend)
+- cost per document: **$0.009454 routed** vs $0.010689 single-model — **11.6% cheaper** (routed spend is 0.88x the single-model spend)
 - accuracy: 97.7% routed vs 97.8% single-model, all fields
 
 
@@ -94,5 +94,5 @@
 
 
 - escalated: 10 of 28 digital docs (35.7%)
-- cost per document: **$0.005528 routed** vs $0.009050 single-model — **38.9% cheaper** (routed spend is 0.61x the single-model spend)
+- cost per document: **$0.005871 routed** vs $0.009668 single-model — **39.3% cheaper** (routed spend is 0.61x the single-model spend)
 - accuracy: 100.0% routed vs 100.0% single-model, all fields

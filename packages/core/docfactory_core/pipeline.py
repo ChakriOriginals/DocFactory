@@ -69,6 +69,20 @@ class FieldSpec:
     item_fields: dict[str, "FieldSpec"] = field(default_factory=dict)
     # ENUM only.
     values: tuple[str, ...] = ()
+    # ENUM only: how each value may legitimately appear in the document.
+    #
+    # An enum constrains what the model is ALLOWED to say, which is not the
+    # same as checking it said the right thing — and it is the more dangerous
+    # half. A model forced to choose between USD and EUR on a GBP invoice
+    # returns one of them, with the correct number, and no arithmetic rule
+    # notices: subtotal + tax still equals total in any currency. The result
+    # is the worst error shape this system can produce, an internally
+    # consistent record that is wrong.
+    #
+    # Declaring surface forms turns the choice into something checkable: at
+    # least one of them has to actually appear in the source text. It is a map
+    # rather than the value itself because documents print "$", not "USD".
+    surface_forms: dict[str, tuple[str, ...]] = field(default_factory=dict)
     pattern: str | None = None
     # MONEY/QUANTITY/RATE only: a value at or below zero is implausible for
     # this field. An invoice total qualifies; its tax does not (a zero-rated
@@ -137,6 +151,11 @@ class PipelineDefinition:
     @property
     def date_fields(self) -> tuple[str, ...]:
         return tuple(n for n, spec in self.fields.items() if spec.is_date)
+
+    @property
+    def grounded_enum_fields(self) -> tuple[str, ...]:
+        """Enum fields whose chosen value must be traceable to the document."""
+        return tuple(n for n, spec in self.fields.items() if spec.surface_forms)
 
     @property
     def table_fields(self) -> tuple[str, ...]:
@@ -300,6 +319,26 @@ def _parse_field(name: str, spec: Any) -> FieldSpec:
     if kind is FieldKind.ENUM and not values:
         raise PipelineConfigError(f"enum field {name!r} must declare values")
 
+    raw_forms = spec.get("surface_forms") or {}
+    if raw_forms and kind is not FieldKind.ENUM:
+        raise PipelineConfigError(f"field {name!r} declares surface_forms but is not an enum")
+    unknown_forms = sorted(set(raw_forms) - set(values))
+    if unknown_forms:
+        raise PipelineConfigError(
+            f"enum field {name!r} declares surface_forms for values it does not "
+            f"allow: {unknown_forms}"
+        )
+    missing_forms = sorted(set(values) - set(raw_forms)) if raw_forms else []
+    if missing_forms:
+        # Partial coverage is worse than none: the values with no forms declared
+        # would silently skip the check, which is exactly the value a model
+        # under pressure would pick.
+        raise PipelineConfigError(
+            f"enum field {name!r} declares surface_forms for some values but not "
+            f"{missing_forms}; cover every value or none"
+        )
+    surface_forms = {value: tuple(forms) for value, forms in raw_forms.items()}
+
     pattern = spec.get("pattern")
     if pattern is not None:
         try:
@@ -315,6 +354,7 @@ def _parse_field(name: str, spec: Any) -> FieldSpec:
         name=name,
         kind=kind,
         required=bool(spec.get("required", True)),
+        surface_forms=surface_forms,
         item_fields=item_fields,
         values=values,
         pattern=pattern,

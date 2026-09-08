@@ -38,7 +38,13 @@ from docfactory_core.date_corroboration import (
     dates_in_text,
     stated_payment_term,
 )
-from docfactory_core.groundedness import GROUNDEDNESS_THRESHOLD, groundedness
+from docfactory_core.groundedness import (
+    GROUNDEDNESS_THRESHOLD,
+    groundedness,
+)
+from docfactory_core.groundedness import (
+    squash_for_matching as _squash_for_enum,
+)
 from docfactory_core.pipeline import FieldKind, PipelineDefinition
 
 # --- Uncalibrated penalty priors (see note 3 above) -------------------------
@@ -53,6 +59,12 @@ PENALTY_SUSPECT_FIELD_SHAPE = 0.20  # per-field: empty-ish / implausible value
 # traced back to the source text is the only evidence available that it was
 # invented. Weighted accordingly — still a prior until 2.2c fits it.
 PENALTY_UNGROUNDED_FIELD = 0.35
+# An enum value the document does not mention anywhere. Same weight as an
+# ungrounded free-text field, and for the same reason: nothing else guards it.
+# Arithmetic rules are currency-blind — subtotal + tax = total holds just as
+# well in the wrong currency — so without this signal a mislabelled invoice
+# scores a clean 1.00 and auto-approves.
+PENALTY_UNGROUNDED_ENUM = 0.35
 
 # Dates that do not appear anywhere on the page. This closes the gap the 2.2c
 # study measured: `shifted_date` accounted for 10 of the 12 errors that
@@ -266,6 +278,44 @@ def score_extraction(
                 field_reasons[table].append(f"ungrounded_row_text:{weakest}")
 
     # --- date corroboration: the only guard on dates against the page ---
+    # --- enum values the document never mentions ------------------------------
+    #
+    # An enum constrains what the model MAY say; nothing checked that it said
+    # the right thing. On a GBP invoice a model restricted to {USD, EUR}
+    # returns one of them with the correct number, every arithmetic rule
+    # passes, and the record auto-approves reading $12,000 for £12,000.
+    #
+    # Whitespace-insensitive because the currency symbol is frequently split
+    # from its amount by the text extractor, the same artifact _squash exists
+    # to absorb for free text.
+    if source_text is not None:
+        squashed_source = _squash_for_enum(source_text)
+        for name in definition.grounded_enum_fields:
+            value = record.get(name)
+            forms = definition.fields[name].surface_forms.get(value or "", ())
+            if not value or not forms:
+                # A value outside the declared set, or one with no forms: the
+                # schema layer already rejects the first, and _parse_field
+                # refuses partial coverage, so reaching here means the record
+                # is malformed rather than merely ungrounded.
+                continue
+            found = any(_squash_for_enum(form) in squashed_source for form in forms)
+
+            # Emitted as `groundedness.{field}`, deliberately, and not under a
+            # key of its own. confidence_model.features_for reads exactly that
+            # key and defaults it to 1.0 — so a new signal name would be
+            # invisible to the fitted model, the heuristic doc_confidence would
+            # drop, and ROUTING would not change at all. Reusing the key means
+            # the already-calibrated groundedness weight does the work and no
+            # refit is needed. Binary here where free text is continuous; the
+            # scale and the meaning are the same.
+            signals[f"groundedness.{name}"] = 1.0 if found else 0.0
+            if not found:
+                doc_penalty += PENALTY_UNGROUNDED_ENUM
+                doc_reasons.append(f"enum_not_in_document:{name}={value}")
+                field_penalties[name] += PENALTY_UNGROUNDED_ENUM
+                field_reasons[name].append(f"not_in_document:{value}")
+
     if source_text is not None:
         text_dates = dates_in_text(source_text)
         signals["date_corroboration.text_dates_found"] = len(text_dates)

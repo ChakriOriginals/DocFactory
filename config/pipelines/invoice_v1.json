@@ -5,7 +5,8 @@
     "field_notes": {
       "tax_rate": "decimal fraction as a string (a printed \"19%\" becomes \"0.19\")",
       "line_items": "one entry per row of the invoice's item table, in document order",
-      "vendor": "the issuing company's name; repair obvious text-extraction artifacts (split or spaced-out letters)"
+      "vendor": "the issuing company's name; repair obvious text-extraction artifacts (split or spaced-out letters)",
+      "currency": "the ISO 4217 code matching the symbol or code printed on the document ($ -> USD, € -> EUR, £ -> GBP, kr -> SEK/NOK/DKK by country); if the document shows a currency outside the allowed list, pick the closest and expect it to be flagged rather than silently accepted"
     }
   },
   "fields": {
@@ -25,8 +26,81 @@
       "kind": "enum",
       "values": [
         "USD",
-        "EUR"
-      ]
+        "EUR",
+        "GBP",
+        "CAD",
+        "AUD",
+        "CHF",
+        "JPY",
+        "SEK",
+        "NOK",
+        "DKK",
+        "INR",
+        "SGD",
+        "NZD",
+        "PLN"
+      ],
+      "surface_forms": {
+        "USD": [
+          "$",
+          "US$",
+          "USD"
+        ],
+        "EUR": [
+          "€",
+          "EUR"
+        ],
+        "GBP": [
+          "£",
+          "GBP"
+        ],
+        "CAD": [
+          "CA$",
+          "C$",
+          "CAD"
+        ],
+        "AUD": [
+          "A$",
+          "AU$",
+          "AUD"
+        ],
+        "CHF": [
+          "CHF",
+          "Fr."
+        ],
+        "JPY": [
+          "¥",
+          "JPY"
+        ],
+        "SEK": [
+          "kr",
+          "SEK"
+        ],
+        "NOK": [
+          "kr",
+          "NOK"
+        ],
+        "DKK": [
+          "kr",
+          "DKK"
+        ],
+        "INR": [
+          "₹",
+          "INR"
+        ],
+        "SGD": [
+          "S$",
+          "SGD"
+        ],
+        "NZD": [
+          "NZ$",
+          "NZD"
+        ],
+        "PLN": [
+          "zł",
+          "PLN"
+        ]
+      }
     },
     "subtotal": {
       "kind": "money"
@@ -171,9 +245,21 @@
         "type": "string",
         "enum": [
           "USD",
-          "EUR"
+          "EUR",
+          "GBP",
+          "CAD",
+          "AUD",
+          "CHF",
+          "JPY",
+          "SEK",
+          "NOK",
+          "DKK",
+          "INR",
+          "SGD",
+          "NZD",
+          "PLN"
         ],
-        "description": "ISO 4217 code"
+        "description": "ISO 4217 code for the currency the document is denominated in. Read it from the document — the symbol or the code — rather than assuming; do not default to USD."
       },
       "subtotal": {
         "type": "string",
