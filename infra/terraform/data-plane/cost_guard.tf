@@ -39,15 +39,43 @@ resource "aws_sns_topic_subscription" "cost_alerts_email" {
 # needs a few days of history before it will forecast at all, so it is a
 # supplement to the actual thresholds rather than a replacement.
 #
-# This budget counts spend WITH credits applied, which makes it a burn-rate
-# gauge: how fast the credit balance is going down. The out-of-pocket budget
-# below is the one that answers the different and more important question.
+# THIS IS THE BURN-RATE GAUGE, and `include_credit = false` is what makes it
+# one. The flag does not mean what its name suggests, and this file used to have
+# it exactly backwards on both budgets.
+#
+# Measured on the live account, same month, same moment:
+#
+#   gross usage                       $0.3654
+#   credits applied                  -$0.3654
+#   net                               $0.0000
+#
+#   budget with include_credit=false  $0.3650   <- tracks GROSS
+#   budget with include_credit=true   $0.0000   <- tracks NET
+#
+# So `include_credit = false` EXCLUDES the credit line items from the sum and
+# shows spend before credits: the burn rate against the balance. It does not
+# show "the spend credits failed to cover", which is what the comment here used
+# to claim and what the $1 out-of-pocket budget below was built on.
+#
+# Percentages of monthly_budget_usd, so this answers "am I consuming credits
+# faster than planned" — the question worth asking while the balance holds.
 resource "aws_budgets_budget" "monthly" {
   name         = "${local.name}-monthly"
   budget_type  = "COST"
   limit_amount = tostring(var.monthly_budget_usd)
   limit_unit   = "USD"
   time_unit    = "MONTHLY"
+
+  cost_types {
+    # Exclude credits: this budget is about consumption, not about the bill.
+    include_credit   = false
+    include_refund   = false
+    include_upfront  = true
+    include_tax      = true
+    include_support  = true
+    include_discount = true
+    use_amortized    = false
+  }
 
   dynamic "notification" {
     # Percentages of the limit, so a raised limit moves them together. At the
@@ -76,16 +104,23 @@ resource "aws_budgets_budget" "monthly" {
 
 # --- tripwire 1b: am I spending REAL money? ---------------------------------
 #
-# The question a promotional-credit account actually needs answered, and the
-# monthly budget above cannot answer it. That one counts spend after credits
-# are applied, so while credits last it reads near zero — reassuring right up
-# to the day the balance hits zero and every subsequent dollar is yours.
+# The question a promotional-credit account actually needs answered, and it
+# needs `include_credit = true` to answer it — the opposite of what this budget
+# used to set.
 #
-# `include_credit = false` inverts it: this budget counts only the spend that
-# credits did NOT cover. It sits at $0.00 for as long as the balance holds, and
-# the moment it moves, real money is leaving. The limit is deliberately $1 with
-# an alert at 1% — that is one cent — because the useful signal is not "how
-# much" but "at all".
+# The original reasoning was sound and the flag was inverted: credits should be
+# INCLUDED so their negative line items cancel the usage, leaving only what the
+# balance did not absorb. That reads $0.00 while credits last, and the moment it
+# moves, real money is leaving. See the measurement in the monthly budget above.
+#
+# The bug was not theoretical. With include_credit = false this budget tracked
+# gross usage, so it fired at one cent of ANY activity — $0.30 of usage that
+# credits had already covered in full, reported as though the account were being
+# charged. An alarm that fires every month regardless of the thing it is
+# watching gets muted, and then the real signal has nowhere to arrive.
+#
+# The limit stays $1 with an alert at 1% — one cent — because the useful signal
+# is not "how much" but "at all". Now it means it.
 #
 # It is a notification, not a brake. Nothing in AWS stops a resource billing on
 # your behalf; what this buys is finding out on the first cent instead of at
@@ -98,9 +133,10 @@ resource "aws_budgets_budget" "out_of_pocket" {
   time_unit    = "MONTHLY"
 
   cost_types {
-    # The whole point. Everything else here is the AWS default, restated
-    # explicitly so a future reader can see that only one flag is unusual.
-    include_credit   = false
+    # The whole point: credits included, so they cancel the usage they cover and
+    # what remains is money actually owed. Everything else is the AWS default,
+    # restated so a future reader can see which flag carries the meaning.
+    include_credit   = true
     include_refund   = false
     include_upfront  = true
     include_tax      = true

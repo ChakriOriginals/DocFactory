@@ -64,11 +64,33 @@ most important cost control on the whole project and it is not something
 Terraform can set — it is one screen in the Billing console. I am not certain
 of the current terms and you should read them rather than take my word.
 
-There is now a budget for precisely this question. `docfactory-dev-out-of-pocket`
-counts spend with **credits excluded**, so it reads $0.00 for as long as the
-balance holds and alerts on the first cent of real money. The ordinary monthly
-budget counts spend *with* credits applied, which makes it a burn-rate gauge —
-useful, but reassuring right up to the day the balance hits zero.
+There is now a budget for precisely this question — `docfactory-dev-out-of-pocket`,
+which counts spend with **credits included**, so their negative line items cancel
+the usage they cover and only unabsorbed spend remains. It reads $0.00 while the
+balance holds and alerts on the first cent of real money.
+
+**This document, the Terraform comments and I all had that flag backwards until
+an alert forced the check.** `include_credit = false` does not mean "spend
+credits did not cover"; it means credits are excluded from the sum, so you see
+gross usage. Measured on the live account at one moment:
+
+| | |
+|---|---|
+| gross usage | $0.3654 |
+| credits applied | -$0.3654 |
+| net | $0.0000 |
+| budget with `include_credit = false` | **$0.3650** — tracks gross |
+| budget with `include_credit = true` | **$0.0000** — tracks net |
+
+The consequence was not academic: the "out-of-pocket" budget fired at one cent
+of ordinary usage that credits had already covered in full, reporting $0.30 as
+though the account were being charged. An alarm that fires every month
+regardless of what it watches gets muted, and then the real signal has nowhere
+to arrive.
+
+The flags are now on the budgets whose names they match: `-out-of-pocket`
+includes credits and measures money owed; `-monthly` excludes them and measures
+consumption against the balance.
 
 ---
 

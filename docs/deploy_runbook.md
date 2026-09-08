@@ -91,8 +91,11 @@ aws cloudwatch describe-alarms --region us-east-1 \
 
 At ~$13.27/month standing, a $10 budget breaches after about **23 days**. If
 you are on a promotional-credit account, the budget that matters more is
-`docfactory-dev-out-of-pocket`: it counts spend with credits EXCLUDED, so it
-reads $0.00 while the balance holds and alerts on the first cent of real money.
+`docfactory-dev-out-of-pocket`: it counts spend with credits INCLUDED, so they
+cancel the usage they cover and it reads $0.00 while the balance holds, alerting
+on the first cent of real money. (Counting with credits EXCLUDED — which this
+line said until an alert proved otherwise — gives gross usage, and fires on any
+activity at all. See docs/cost_model.md for the measurement.)
 `terraform output cost_runway` prints how long the balance lasts in each
 resting state.
 

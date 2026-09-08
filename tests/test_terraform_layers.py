@@ -347,3 +347,67 @@ def test_every_cluster_touching_step_is_gated_on_the_check() -> None:
         f"These steps touch the cluster but are not gated on the parked check: "
         f"{ungated}. They will run against a destroyed cluster."
     )
+
+
+# --- The two budgets measure opposite things; the flags must not swap back ----
+#
+# `include_credit` does not mean what its name suggests, and this repo had it
+# backwards on both budgets until a live alert forced the measurement:
+#
+#   gross usage $0.3654 / credits -$0.3654 / net $0.0000
+#   include_credit = false -> budget read $0.3650   (gross)
+#   include_credit = true  -> budget read $0.0000   (net)
+#
+# So false = consumption, true = money owed. The out-of-pocket budget had false,
+# which made it fire at one cent of credit-covered usage every month.
+
+COST_GUARD = DATA_PLANE / "cost_guard.tf"
+
+
+def _budget_block(name: str) -> str:
+    """The HCL of one budget, comments stripped.
+
+    Comments matter here. The block runs to the next resource declaration, so it
+    swallows the prose in between — and that prose explains the flag by quoting
+    it. A first version of these tests matched `include_credit = false` inside a
+    sentence describing the bug and passed against the inverted config it was
+    written to catch. Caught by inverting the file and watching the test not
+    fail, which is the only way that class of mistake shows up.
+    """
+    src = _strip_comments(COST_GUARD.read_text())
+    start = src.index(f'resource "aws_budgets_budget" "{name}"')
+    nxt = src.find('resource "aws_budgets_budget"', start + 10)
+    return src[start : nxt if nxt != -1 else len(src)]
+
+
+def test_the_out_of_pocket_budget_includes_credits() -> None:
+    """Only with credits included does it measure money actually owed."""
+    block = _budget_block("out_of_pocket")
+    assert re.search(r"include_credit\s*=\s*true", block), (
+        "out_of_pocket has include_credit = false again. That measures GROSS "
+        "usage, not out-of-pocket spend: it fires on any activity at all, even "
+        "when credits cover it in full, and an alarm that always fires gets "
+        "muted."
+    )
+
+
+def test_the_monthly_budget_excludes_credits() -> None:
+    """Only with credits excluded is it a burn-rate gauge."""
+    block = _budget_block("monthly")
+    assert re.search(r"include_credit\s*=\s*false", block), (
+        "monthly has include_credit = true again. That measures net spend, "
+        "which reads $0.00 for as long as credits last — so it cannot answer "
+        "'how fast am I consuming the balance', which is its whole purpose."
+    )
+
+
+def test_the_two_budgets_do_not_measure_the_same_thing() -> None:
+    """The failure mode is both flags landing on the same value."""
+    a = re.search(r"include_credit\s*=\s*(\w+)", _budget_block("out_of_pocket"))
+    b = re.search(r"include_credit\s*=\s*(\w+)", _budget_block("monthly"))
+    assert a and b, "one of the budgets no longer sets include_credit explicitly"
+    assert a.group(1) != b.group(1), (
+        "Both budgets now measure the same thing. One must include credits "
+        "(money owed) and the other exclude them (consumption); with both the "
+        "same, one of the two questions has no alarm at all."
+    )
