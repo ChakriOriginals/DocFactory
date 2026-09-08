@@ -63,6 +63,14 @@ variable "neon_database_url_owner" {
   EOT
   type        = string
   sensitive   = true
+
+  validation {
+    # parameters.tf rewrites sslmode to verify-full. A URL with no sslmode at
+    # all would make that rewrite a silent no-op and ship an unverified
+    # connection, so refuse it here instead. This one can also change the schema.
+    condition     = can(regex("sslmode=[a-z-]+", var.neon_database_url_owner))
+    error_message = "The connection string must carry an sslmode= parameter; it is rewritten to verify-full before being stored."
+  }
 }
 
 variable "neon_database_url_app" {
@@ -75,6 +83,14 @@ variable "neon_database_url_app" {
   EOT
   type        = string
   sensitive   = true
+
+  validation {
+    # parameters.tf rewrites sslmode to verify-full. A URL with no sslmode at
+    # all would make that rewrite a silent no-op and ship an unverified
+    # connection, so refuse it here instead. This is the role every task connects as.
+    condition     = can(regex("sslmode=[a-z-]+", var.neon_database_url_app))
+    error_message = "The connection string must carry an sslmode= parameter; it is rewritten to verify-full before being stored."
+  }
 }
 
 variable "anthropic_api_key" {

@@ -27,6 +27,43 @@
 
 locals {
   parameter_prefix = "/${local.name}"
+
+  # --- TLS that actually verifies -------------------------------------------
+  #
+  # The URLs arrive carrying `sslmode=require`, which negotiates TLS and then
+  # accepts whatever certificate it is handed: no CA check, no hostname check.
+  # Every task runs in a public subnet and reaches Neon across the internet
+  # gateway (there is deliberately no NAT), so anyone in that path could present
+  # their own certificate, harvest the app-role password and read every document
+  # in flight. "Do you use verify-full?" is a question vendor questionnaires ask
+  # by name.
+  #
+  # Rewritten here rather than trusted to whatever was pasted into .env.deploy,
+  # so the guarantee is structural. The variable validation refuses a URL with
+  # no sslmode at all, because then this replace would silently do nothing.
+  #
+  # THE EXPLICIT CA PATH IS NOT BELT-AND-BRACES; WITHOUT IT THIS FAILS.
+  # Measured against the real endpoint from inside the deployed image:
+  #
+  #   sslmode=verify-full                              certificate verify failed
+  #   sslmode=verify-full&sslrootcert=system           certificate verify failed
+  #   sslmode=verify-full&sslrootcert=<path below>     connected
+  #
+  # Neon's certificate is ordinary Let's Encrypt and Python's own ssl module
+  # verifies it with default CAs without complaint. The problem is that
+  # psycopg[binary] ships its own libpq and OpenSSL, and that build does not
+  # find the Debian trust store on its own — including via `sslrootcert=system`,
+  # which is the fix libpq's own error message suggests. Pinning the path is
+  # what works.
+  #
+  # The path is the one inside the container images (Debian bookworm, which
+  # carries ca-certificates). These parameters are read only by ECS tasks; local
+  # development reads DATABASE_URL from .env and never sees this value.
+  _ca_bundle = "/etc/ssl/certs/ca-certificates.crt"
+  _verified  = "sslmode=verify-full&sslrootcert=${local._ca_bundle}"
+
+  database_url_app   = replace(var.neon_database_url_app, "/sslmode=[a-z-]+/", local._verified)
+  database_url_owner = replace(var.neon_database_url_owner, "/sslmode=[a-z-]+/", local._verified)
 }
 
 # Standard tier explicitly, never Advanced. Advanced parameters are $0.05 each
@@ -37,7 +74,7 @@ resource "aws_ssm_parameter" "database_url_app" {
   description = "Neon connection string for the non-superuser app role."
   type        = "SecureString"
   tier        = "Standard"
-  value       = var.neon_database_url_app
+  value       = local.database_url_app
 }
 
 resource "aws_ssm_parameter" "database_url_owner" {
@@ -45,7 +82,7 @@ resource "aws_ssm_parameter" "database_url_owner" {
   description = "Neon owner connection string. Migrations only - never the app tasks."
   type        = "SecureString"
   tier        = "Standard"
-  value       = var.neon_database_url_owner
+  value       = local.database_url_owner
 }
 
 resource "aws_ssm_parameter" "anthropic_api_key" {

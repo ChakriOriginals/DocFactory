@@ -125,6 +125,50 @@ else
   pass "server refuses unencrypted connections (TLS is enforced)"
 fi
 
+# --- 6. the certificate is actually VERIFIED, not merely presented -----------
+#
+# Check 5 proves the connection is encrypted. It does not prove anyone checked
+# who is on the other end. `sslmode=require` negotiates TLS and then accepts
+# whatever certificate it is handed — no CA chain, no hostname — so an attacker
+# in the path presents their own, and harvests the password and every document.
+# Tasks run in public subnets and reach Neon across the internet gateway, so
+# "in the path" is not hypothetical.
+#
+# The deployed parameters carry sslmode=verify-full. This asserts the property
+# rather than the spelling: hand libpq a real, valid CA that did not sign Neon
+# and require that the connection be REFUSED. A check that only grepped the URL
+# would pass against a client that ignores the setting.
+#
+# Getting here took measuring, because the obvious spelling does not work:
+#   sslmode=verify-full                      -> certificate verify failed
+#   sslmode=verify-full&sslrootcert=system   -> certificate verify failed
+#   sslmode=verify-full&sslrootcert=<path>   -> connects
+# psycopg[binary] ships its own libpq/OpenSSL which does not find the system
+# trust store on its own, including via `system` — which is the fix libpq's own
+# error message suggests.
+if ! command -v openssl >/dev/null 2>&1; then
+  info "openssl not available - skipping the certificate-verification check"
+else
+  WRONG_CA="$(mktemp -t wrongca).crt"
+  openssl req -x509 -newkey rsa:2048 -keyout /dev/null -out "$WRONG_CA" -days 1 -nodes \
+    -subj "/CN=not-neons-ca" >/dev/null 2>&1
+
+  VERIFY_URL="${APP_URL%%\?*}?sslmode=verify-full&sslrootcert=${WRONG_CA}"
+  if psql "$VERIFY_URL" -tAX -c "SELECT 1" >/dev/null 2>&1; then
+    fail "a certificate from an UNRELATED CA was accepted - verification is not happening"
+    info "the connection is encrypted but unauthenticated; anyone in the path can impersonate the database"
+  else
+    # Control: the same host with verification off must still connect, so the
+    # refusal above is verification and not an unrelated connectivity failure.
+    if psql "${APP_URL%%\?*}?sslmode=require" -tAX -c "SELECT 1" >/dev/null 2>&1; then
+      pass "an unrelated CA is refused (certificates are verified, not just presented)"
+    else
+      info "could not connect even with verification off - the refusal above is inconclusive"
+    fi
+  fi
+  rm -f "$WRONG_CA"
+fi
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   echo "  All checks passed. Neon is ready; proceed to the data-plane apply."
