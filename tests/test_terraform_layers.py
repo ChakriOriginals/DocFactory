@@ -257,3 +257,38 @@ def test_retention_keeps_enough_images_to_roll_back() -> None:
         "Retention below 2 breaks rollback: the circuit breaker pulls the "
         "previous task definition's image, which would already be expired."
     )
+
+
+# --- The orphan check has two scopes, and the default is dangerous after a park
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+RUNBOOK = Path(__file__).resolve().parents[1] / "docs" / "deploy_runbook.md"
+
+
+def test_the_orphan_check_distinguishes_a_park_from_a_teardown() -> None:
+    """Without a scope flag it calls the retained data layer an orphan.
+
+    The park -- destroy compute, keep the bucket, queues, images and SSM
+    parameters -- is the normal overnight operation. Run against that, the
+    unscoped check listed the whole data layer under ORPHAN and printed
+    "Delete them, or re-run terraform destroy". Following that deletes the
+    parameters holding the production database credentials.
+    """
+    script = (SCRIPTS / "aws_orphan_check.sh").read_text()
+    assert "--park" in script, (
+        "aws_orphan_check.sh no longer understands --park. Without it the check "
+        "cannot tell a park from a full teardown, and reports the retained data "
+        "layer as orphans to be deleted."
+    )
+    assert 'SCOPE="full"' in script, "the default scope should stay the full teardown"
+
+
+def test_the_runbook_passes_park_when_it_parks() -> None:
+    """A correct script that the runbook invokes wrongly is still the bug."""
+    runbook = RUNBOOK.read_text()
+    park_section = runbook[runbook.index('cd "$TF_COMPUTE" && terraform destroy') :][:2000]
+    assert "--park" in park_section, (
+        "The runbook's park procedure calls the orphan check without --park, so "
+        "following it reports the data layer as orphans and tells the operator "
+        "to delete it."
+    )

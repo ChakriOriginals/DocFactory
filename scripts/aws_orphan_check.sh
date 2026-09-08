@@ -16,7 +16,18 @@
 # Run this after every destroy. It looks for anything tagged project=docfactory
 # plus the untagged categories that bite hardest.
 #
-#   ./scripts/aws_orphan_check.sh [region]
+#   ./scripts/aws_orphan_check.sh [region]           # full teardown: BOTH layers gone
+#   ./scripts/aws_orphan_check.sh --park [region]    # park: only the compute layer gone
+#
+# THE SCOPE FLAG IS NOT COSMETIC. The park is the normal overnight operation:
+# `terraform destroy` in compute-plane/ leaves the bucket, queues, images, SSM
+# parameters and budgets deliberately intact. Without --park this script called
+# every one of those an orphan and printed "Delete them, or re-run terraform
+# destroy" -- advice that, followed literally after the park the runbook itself
+# documents, deletes the queues, the images and the SSM parameters holding the
+# production database credentials.
+#
+# Found by parking the live stack and reading what the script actually said.
 #
 # Exit 0 = clean. Exit 1 = something survived; the output says what.
 # Exit 3 = one or more checks could not run, so the answer is UNKNOWN.
@@ -32,6 +43,23 @@
 
 set -uo pipefail
 
+SCOPE="full"
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --park) SCOPE="park" ;;
+    --full) SCOPE="full" ;;
+    -h|--help)
+      echo "usage: $0 [--park|--full] [region]"
+      echo "  --full (default)  both layers destroyed; anything left is an orphan"
+      echo "  --park            only the compute layer destroyed; the data layer is expected"
+      exit 0
+      ;;
+    *) ARGS+=("$arg") ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 REGION="${1:-${AWS_REGION:-us-east-1}}"
 PROJECT_TAG="docfactory"
 FOUND=0
@@ -42,10 +70,19 @@ command -v aws >/dev/null 2>&1 || {
   exit 2
 }
 
-# probe NAME -- aws args...
+# probe [--data] NAME -- aws args...
 #
 # Three outcomes, never two: clean, orphan, or "the check itself failed".
+#
+# --data marks a category the DATA layer owns. Those survive a park on purpose,
+# so under --park they are reported as kept rather than as orphans. Under a full
+# teardown they are orphans like anything else.
 probe() {
+  local layer="compute"
+  if [ "$1" = "--data" ]; then
+    layer="data"
+    shift
+  fi
   local name="$1"
   shift
   [ "$1" = "--" ] && shift
@@ -64,29 +101,95 @@ probe() {
   fi
   rm -f "$stderr_file"
 
-  report "$name" "$output"
+  report "$name" "$output" "$layer"
 }
 
-report() { # name, payload
+advise() { # name, payload -- visible, but never sets FOUND
   if [ -n "${2//[[:space:]]/}" ] && [ "$2" != "None" ]; then
-    echo "  ORPHAN  $1:"
+    echo "  ADVISORY $1:"
     echo "$2" | sed 's/^/          /'
-    FOUND=1
+    echo "          ^ cross-check these against the per-service probes below."
+    echo "            The tagging API lags a destroy: on a real park it listed"
+    echo "            the ECS cluster, both services and the VPC endpoint, all"
+    echo "            of which were already gone. Anything the owning service"
+    echo "            reports clean is lag, not an orphan."
   else
-    echo "  clean   $1"
+    echo "  clean    $1"
   fi
 }
 
-echo "Orphan check: project=${PROJECT_TAG} in ${REGION}"
+report() { # name, payload, [layer]
+  local layer="${3:-compute}"
+  if [ -n "${2//[[:space:]]/}" ] && [ "$2" != "None" ]; then
+    if [ "$SCOPE" = "park" ] && [ "$layer" = "data" ]; then
+      # Expected: the park keeps the data layer. Still printed, because
+      # "what survived" is the question being asked -- just not as a problem.
+      echo "  kept    $1 (data layer, retained by the park):"
+      echo "$2" | sed 's/^/          /'
+    else
+      echo "  ORPHAN  $1:"
+      echo "$2" | sed 's/^/          /'
+      FOUND=1
+    fi
+  else
+    if [ "$SCOPE" = "park" ] && [ "$layer" = "data" ]; then
+      # A data-layer category that is EMPTY after a park is not good news --
+      # the park was supposed to leave it alone.
+      echo "  MISSING $1 — expected to survive the park, but nothing is there"
+      FOUND=1
+    else
+      echo "  clean   $1"
+    fi
+  fi
+}
+
+if [ "$SCOPE" = "park" ]; then
+  echo "Park check: project=${PROJECT_TAG} in ${REGION} (compute destroyed, data layer expected)"
+else
+  echo "Orphan check: project=${PROJECT_TAG} in ${REGION} (full teardown, nothing expected)"
+fi
 echo
 
 # Tagged resources — the broad sweep. Anything this stack created carries the
 # project tag, so one API call covers most of it.
-probe "tagged resources" -- \
+#
+# TWO THINGS MAKE THIS SWEEP ADVISORY RATHER THAN AUTHORITATIVE, AND BOTH WERE
+# OBSERVED ON A REAL PARK:
+#
+#   1. It spans both layers, so under --park it lists the whole data plane. The
+#      filter below drops the services the data layer owns; whatever is left is
+#      compute and should not have survived.
+#
+#   2. The Resource Groups Tagging API is eventually consistent. Immediately
+#      after a destroy it still returned the ECS cluster, both services, all
+#      three task definitions and the VPC endpoint -- every one of which the
+#      per-service probes below correctly reported as gone. Believe those: they
+#      ask the owning service directly. A name here that the matching probe
+#      calls clean is tagging lag, not an orphan.
+# Filtered in the shell rather than in the query: JMESPath in the AWS CLI has
+# no split(), and a chain of negated contains() is harder to read than a grep.
+compute_tagged_resources() {
   aws resourcegroupstaggingapi get-resources \
-  --region "$REGION" \
-  --tag-filters "Key=project,Values=${PROJECT_TAG}" \
-  --query 'ResourceTagMappingList[].ResourceARN' --output text
+    --region "$REGION" \
+    --tag-filters "Key=project,Values=${PROJECT_TAG}" \
+    --query 'ResourceTagMappingList[].ResourceARN' --output text \
+    | tr '\t' '\n' \
+    | grep -vE '^arn:aws:(s3|sqs|ecr|ssm|sns):' \
+    | grep -vE '^arn:aws:cloudwatch:.*:alarm:.*-dlq-' \
+    | tr '\n' '\t'
+  # grep exits 1 when it filters everything out, which is the CLEAN case here.
+  return 0
+}
+
+if [ "$SCOPE" = "park" ]; then
+  advise "tagged compute-layer resources" "$(compute_tagged_resources)"
+else
+  probe "tagged resources" -- \
+    aws resourcegroupstaggingapi get-resources \
+    --region "$REGION" \
+    --tag-filters "Key=project,Values=${PROJECT_TAG}" \
+    --query 'ResourceTagMappingList[].ResourceARN' --output text
+fi
 
 # The expensive untagged categories, checked by hand because a resource created
 # before the tag policy — or by a half-failed destroy — will not appear above.
@@ -135,11 +238,11 @@ probe "log groups" -- \
   --log-group-name-prefix "/ecs/${PROJECT_TAG}" \
   --query 'logGroups[].logGroupName' --output text
 
-probe "SQS queues" -- \
+probe --data "SQS queues" -- \
   aws sqs list-queues --region "$REGION" \
   --queue-name-prefix "${PROJECT_TAG}" --query 'QueueUrls' --output text
 
-probe "ECR repositories" -- \
+probe --data "ECR repositories" -- \
   aws ecr describe-repositories --region "$REGION" \
   --query "repositories[?contains(repositoryName, '${PROJECT_TAG}')].repositoryName" \
   --output text
@@ -147,10 +250,19 @@ probe "ECR repositories" -- \
 # Added in 4f-B. These are cheap-to-free, but a stack that "no longer exists"
 # while its budget alarm still emails you is a stack you will not trust the
 # next time it says something.
-probe "CloudWatch alarms" -- \
+# Split by layer rather than checked as one list. The DLQ alarms belong to the
+# data plane and are supposed to outlive a park; the scaling and dead-man's-
+# switch alarms belong to compute and are not. Reported as one list, a surviving
+# scale-out alarm hides among three expected DLQ alarms.
+probe --data "DLQ alarms" -- \
   aws cloudwatch describe-alarms --region "$REGION" \
   --alarm-name-prefix "${PROJECT_TAG}" \
-  --query 'MetricAlarms[].AlarmName' --output text
+  --query 'MetricAlarms[?contains(AlarmName, `dlq`)].AlarmName' --output text
+
+probe "CloudWatch alarms (compute layer)" -- \
+  aws cloudwatch describe-alarms --region "$REGION" \
+  --alarm-name-prefix "${PROJECT_TAG}" \
+  --query 'MetricAlarms[?contains(AlarmName, `dlq`) == `false`].AlarmName' --output text
 
 probe "composite alarms" -- \
   aws cloudwatch describe-alarms --region "$REGION" --alarm-types CompositeAlarm \
@@ -160,19 +272,19 @@ probe "composite alarms" -- \
 # Billing alarms are always in us-east-1 whatever region the stack ran in, so
 # they survive a region-scoped sweep that looks correct.
 if [ "$REGION" != "us-east-1" ]; then
-  probe "billing alarms (us-east-1, where AWS/Billing always lives)" -- \
+  probe --data "billing alarms (us-east-1, where AWS/Billing always lives)" -- \
     aws cloudwatch describe-alarms --region us-east-1 \
     --alarm-name-prefix "${PROJECT_TAG}" \
     --query 'MetricAlarms[].AlarmName' --output text
 
   # That alarm needs its own SNS topic in its own region, because alarm actions
   # cannot cross regions. It is as easy to strand as the alarm itself.
-  probe "SNS topics in us-east-1 (the billing alarm's own topic)" -- \
+  probe --data "SNS topics in us-east-1 (the billing alarm's own topic)" -- \
     aws sns list-topics --region us-east-1 \
     --query "Topics[?contains(TopicArn, '${PROJECT_TAG}')].TopicArn" --output text
 fi
 
-probe "SNS topics" -- \
+probe --data "SNS topics" -- \
   aws sns list-topics --region "$REGION" \
   --query "Topics[?contains(TopicArn, '${PROJECT_TAG}')].TopicArn" --output text
 
@@ -198,7 +310,7 @@ echo "${budgets:-  (none — consider leaving one in place)}" | sed 's/^/       
 # none of the "a secret with this name is scheduled for deletion" trouble that
 # Secrets Manager used to cause on the next apply. Probed anyway, because a
 # parameter that survives a destroy is a credential nobody is watching.
-probe "SSM parameters" -- \
+probe --data "SSM parameters" -- \
   aws ssm describe-parameters --region "$REGION" \
   --parameter-filters "Key=Name,Option=BeginsWith,Values=/${PROJECT_TAG}" \
   --query 'Parameters[].Name' --output text
@@ -229,10 +341,23 @@ if [ "$UNKNOWN" -ne 0 ] && [ "$FOUND" -eq 0 ]; then
   exit 3
 fi
 if [ "$FOUND" -eq 0 ]; then
-  echo "CLEAN — nothing billable survived the destroy."
+  if [ "$SCOPE" = "park" ]; then
+    echo "PARKED — the compute layer is gone and the data layer is intact."
+    echo "Standing cost is now the data layer only: about \$0.11/month plus image"
+    echo "storage. Bring it back with terraform apply in compute-plane/."
+  else
+    echo "CLEAN — nothing billable survived the destroy."
+  fi
   exit 0
 fi
-echo "ORPHANS FOUND — see above. Delete them, or re-run terraform destroy."
-echo "If Terraform no longer tracks them, delete by ARN in the console."
+if [ "$SCOPE" = "park" ]; then
+  echo "ORPHANS FOUND — compute-layer resources survived the park, or a data-layer"
+  echo "category is unexpectedly empty. Anything marked kept is fine and must NOT"
+  echo "be deleted: the park keeps the bucket, queues, images, parameters and"
+  echo "budgets on purpose. Re-run terraform destroy in compute-plane/ only."
+else
+  echo "ORPHANS FOUND — see above. Delete them, or re-run terraform destroy."
+  echo "If Terraform no longer tracks them, delete by ARN in the console."
+fi
 [ "$UNKNOWN" -ne 0 ] && echo "Some checks also failed to run; the list above may be incomplete."
 exit 1

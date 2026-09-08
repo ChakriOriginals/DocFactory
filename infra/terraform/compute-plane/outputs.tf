@@ -59,6 +59,7 @@ output "teardown_reminder" {
     "See docs/cost_model.md.",
     "`terraform destroy` HERE removes both and keeps the bucket, queues,",
     "secrets and images intact — that is the overnight park.",
-    "Then run scripts/aws_orphan_check.sh to confirm nothing survived.",
+    "Then run scripts/aws_orphan_check.sh --park to confirm the compute layer is gone.",
+    "Without --park it treats the retained data layer as orphans and tells you to delete it.",
   ])
 }

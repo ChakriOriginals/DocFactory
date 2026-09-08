@@ -611,10 +611,27 @@ Two shapes. **Park** is what you do most nights.
 
 ```bash
 cd "$TF_COMPUTE" && terraform destroy
+./scripts/aws_orphan_check.sh --park "$AWS_REGION"
 ```
 
 The bucket, the queues and their contents, the secrets and the pushed images
 all survive. `terraform apply` here brings the URL back in a few minutes.
+
+**`--park` is not optional here.** The check has two scopes, and the default
+assumes both layers are gone. Run it without `--park` after a park and it calls
+the entire data layer an orphan — the queues, the images, and the SSM
+parameters holding the production database credentials — and then prints
+"Delete them, or re-run terraform destroy". Following that literally destroys
+the thing the park exists to preserve.
+
+- exit **0** / `PARKED` — compute gone, data layer intact. This is success.
+- exit **1** — either a compute resource survived, or a data-layer category is
+  unexpectedly empty. Both are named in the output.
+
+Lines marked `ADVISORY` come from the resource-tagging API, which lags a
+destroy: on a real park it listed the ECS cluster, both services and the VPC
+endpoint several minutes after all four were gone. The per-service probes ask
+the owning service directly; believe those.
 
 **Full teardown:**
 
