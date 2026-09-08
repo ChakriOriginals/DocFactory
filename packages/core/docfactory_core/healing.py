@@ -28,6 +28,7 @@ exhausts it stays dead.
 import json
 import logging
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -91,6 +92,10 @@ class ReapReport:
     scanned: int = 0
     requeued: int = 0
     skipped_budget: int = 0
+    # Stranded, reapable, but not by this caller — see `stages` on
+    # reap_stuck_documents. Counted rather than ignored so a sweeper that is
+    # permitted to fix nothing is distinguishable from one with nothing to fix.
+    skipped_stage: int = 0
     by_status: dict[str, int] = field(default_factory=dict)
     document_ids: list[str] = field(default_factory=list)
 
@@ -114,6 +119,7 @@ def reap_stuck_documents(
     stale_after: timedelta | None = None,
     now: datetime | None = None,
     limit: int = 200,
+    stages: Collection[str] | None = None,
 ) -> ReapReport:
     """Re-enqueue documents stranded in a non-terminal state with no message.
 
@@ -131,6 +137,18 @@ def reap_stuck_documents(
     Runs per tenant under RLS rather than through the owner connection. The
     worker has no owner credentials by design (4d), and a sweeper that needed
     them would be a reason to hand them out.
+
+    `stages` restricts which requeue targets this caller will attempt, and
+    exists because the API runs this sweep too. The API task role may send to
+    `parse` and `ingest` and deliberately not to `extract` — it never consumes
+    from a queue and never drives extraction, which is a boundary worth keeping
+    rather than widening to make a sweeper convenient. Without the filter the
+    API would attempt an extract send it is not permitted to make, and turn a
+    recovery mechanism into a stream of AccessDenied.
+
+    Documents whose stage is excluded are counted in `skipped_stage` rather
+    than silently passed over, so a caller that is quietly reaping nothing is
+    visible instead of merely quiet.
     """
     settings = get_settings()
     stale_after = stale_after or timedelta(minutes=15)
@@ -162,6 +180,9 @@ def reap_stuck_documents(
             report.scanned += 1
             stage = _REQUEUE_STAGE.get(DocumentStatus(status))
             if stage is None:
+                continue
+            if stages is not None and stage not in stages:
+                report.skipped_stage += 1
                 continue
 
             if status == DocumentStatus.BUDGET_EXCEEDED:

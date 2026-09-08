@@ -12,6 +12,7 @@ duplicate upload loses the INSERT race and returns the existing document.
 
 import hashlib
 import logging
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -53,6 +54,71 @@ _CHUNK_SIZE = 1024 * 1024
 _PDF_MAGIC = b"%PDF-"
 
 
+# The stages this process is ALLOWED to requeue.
+#
+# The API task role may send to parse and ingest, and deliberately not to
+# extract: it never consumes from a queue and never drives extraction. That
+# boundary is worth keeping, so the sweep is filtered to match it rather than
+# the role being widened to make a sweeper convenient.
+#
+# It is not a partial fix. The stage the API can reap is exactly the stage that
+# strands when nothing else is running — a document is created here, in status
+# `received`, and enqueued to parse immediately after; if that send fails the
+# row exists with no message and only this process is awake to notice.
+# Documents stranded at parsed/extracting reached those states inside a worker,
+# and a worker that ran will sweep them.
+_API_REAPABLE_STAGES = frozenset({"parse"})
+
+
+def _reaper_loop(stop: threading.Event, settings) -> None:
+    """Sweep for documents stranded before their first message existed.
+
+    THE REASON THIS LIVES HERE AND NOT ONLY IN THE WORKER. The worker's sweep
+    reasons that "a fleet that scales to zero has nobody to run a cron, so
+    every running worker sweeps". True, and it leaves the gap this covers:
+    worker_min_count is 0, and a stranded document has no message, so there is
+    no queue depth, so the backlog alarm never fires, so no worker ever starts
+    to run the sweep that would have found it. The document waits for an
+    unrelated upload — until tomorrow on a quiet day, until Monday on a quiet
+    week.
+
+    The API is desired_count 1 and always awake, which is the whole point.
+
+    NOTHING HERE MAY KILL THE API. A sweeper that takes down the process it
+    lives in has done more damage than the documents it was looking for — the
+    same rule the worker's loop states, and the API is the more costly place to
+    break it.
+    """
+    from datetime import timedelta
+
+    from docfactory_core.healing import reap_stuck_documents
+
+    stale_after = timedelta(seconds=settings.heal_stale_after_seconds)
+
+    # Wait first, so a restart does not sweep in the same instant it starts
+    # serving.
+    while not stop.wait(settings.heal_interval_seconds):
+        try:
+            report = reap_stuck_documents(
+                app.state.broker,
+                stale_after=stale_after,
+                stages=_API_REAPABLE_STAGES,
+            )
+        except Exception:
+            log.exception("reaper sweep failed; the API continues")
+            continue
+        if report.requeued or report.skipped_stage:
+            log.info(
+                "reaper sweep",
+                extra={
+                    "requeued": report.requeued,
+                    "scanned": report.scanned,
+                    "skipped_stage": report.skipped_stage,
+                    "skipped_budget": report.skipped_budget,
+                },
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging("api")
@@ -60,7 +126,19 @@ async def lifespan(app: FastAPI):
     ensure_infra()
     app.state.store = ObjectStore()
     app.state.broker = QueueBroker()
-    yield
+
+    settings = get_settings()
+    stop = threading.Event()
+    reaper = threading.Thread(
+        target=_reaper_loop, args=(stop, settings), name="reaper", daemon=True
+    )
+    reaper.start()
+    try:
+        yield
+    finally:
+        # Daemon, so shutdown does not depend on it — but signalling lets an
+        # in-flight wait return promptly instead of holding a sweep interval.
+        stop.set()
 
 
 app = FastAPI(title="DocFactory API", lifespan=lifespan)
