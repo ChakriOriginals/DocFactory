@@ -37,7 +37,7 @@ from docfactory_core.models import (
 )
 from docfactory_core.pipeline_registry import available_slugs
 from docfactory_core.queues import QueueBroker
-from docfactory_core.review import open_tasks, queue_depth, resolve_task
+from docfactory_core.review import correct_extraction, open_tasks, queue_depth, resolve_task
 from docfactory_core.storage import ObjectStore
 from docfactory_core.tracing import inject_trace_context, setup_tracing
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile
@@ -239,6 +239,17 @@ class DocumentPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class CorrectionRequest(BaseModel):
+    """Field values a client says are wrong, and what they should be."""
+
+    corrections: dict[str, str]
+
+
+class CorrectionResponse(BaseModel):
+    document_id: uuid.UUID
+    corrected_fields: int
 
 
 class UsageRollup(BaseModel):
@@ -670,6 +681,38 @@ def _summarize(task: ReviewTask, now: datetime) -> ReviewTaskSummary:
         sla_due_at=task.sla_due_at,
         breached=task.is_breached(now),
     )
+
+
+@app.post("/documents/{document_id}/corrections", response_model=CorrectionResponse)
+def correct_document(document_id: uuid.UUID, request: CorrectionRequest) -> CorrectionResponse:
+    """Correct an extraction the client says is wrong.
+
+    THE GAP. POST /review/tasks/{id}/resolve was the only write path in the
+    API, and it needs a ReviewTask. A document that auto-approved never had
+    one — by definition, because the confidence model was sure about it. So the
+    errors a client actually notices, the ones that came back clean and wrong,
+    were exactly the errors they had no way to report: the stored extraction
+    stayed wrong and the API kept serving it.
+
+    It compounds, too. Every eval_case in the corpus came from a resolved
+    review task, so the feedback loop learned only from errors the confidence
+    model had already caught. The errors it is blind to could not enter the
+    training data by construction.
+
+    RLS scopes the lookup, so another tenant's document is a 404 rather than a
+    403 — the same reasoning as GET /documents/{id}.
+    """
+    try:
+        corrected = correct_extraction(document_id, corrections=request.corrections)
+    except ValueError as exc:
+        message = str(exc)
+        if "not found" in message:
+            raise HTTPException(status_code=404, detail=message) from exc
+        # A field that is not part of this extraction, an empty correction, or
+        # a document with nothing to correct (needs_ocr, failed) are all the
+        # caller asking for something that cannot be done, not a server fault.
+        raise HTTPException(status_code=422, detail=message) from exc
+    return CorrectionResponse(document_id=document_id, corrected_fields=corrected)
 
 
 @app.get("/review/tasks", response_model=list[ReviewTaskSummary])
