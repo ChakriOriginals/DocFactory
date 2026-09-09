@@ -114,12 +114,58 @@ def ingest_object(ref: ObjectRef, store, broker) -> IngestResult:
         return IngestResult(None, None, skipped="not-an-ingest-key")
 
     body = store.get_object(ref.key)
-    if not body.startswith(_PDF_MAGIC):
-        log.warning("ignoring non-PDF drop", extra={"key": ref.key})
-        return IngestResult(None, tenant_id, skipped="not-a-pdf")
-
     sha256 = hashlib.sha256(body).hexdigest()
     settings = get_settings()
+
+    if not body.startswith(_PDF_MAGIC):
+        # RECORDED AS A FAILED DOCUMENT, NOT DROPPED.
+        #
+        # This used to log a warning and return. Nothing raised, so the SQS
+        # message was deleted rather than redelivered: no row, no DLQ entry, no
+        # alarm, no trace of the object anywhere in the system. A client's
+        # nightly export that truncates one file loses it completely, and the
+        # only way to find out is to reconcile "we sent 500" against "you have
+        # 497" and have nothing to point at for the missing three.
+        #
+        # It also contradicted the deploy runbook, whose invariant 6 told the
+        # operator to drop a corrupt PDF and expect a message in the parse DLQ
+        # and a `failed` document. Neither happened. Measured before the fix:
+        # document count 3 before, 3 after, no exception raised.
+        #
+        # A row is the whole fix. It gives the object an id, a status a client
+        # can filter for, and an error string saying what was wrong — and it
+        # costs nothing, because the bytes were already read and hashed.
+        #
+        # Deliberately NOT raised as an exception. Failing the message would
+        # send it round three receives into the DLQ, which is machinery for
+        # transient trouble; a file that is not a PDF will not become one on
+        # the third read. Terminal and visible beats retried and eventually
+        # buried.
+        log.warning("non-PDF drop recorded as failed", extra={"key": ref.key})
+        with session_scope(tenant_id) as session:
+            existing = session.scalar(select(Document).where(Document.sha256 == sha256))
+            if existing is not None:
+                return IngestResult(existing.id, tenant_id, duplicate=True, skipped="not-a-pdf")
+
+        rejected = Document(
+            id=uuid.uuid4(),
+            tenant_id=tenant_id,
+            s3_key=ref.key,
+            sha256=sha256,
+            doc_type=doc_type or "invoice",
+            status=DocumentStatus.FAILED,
+            last_error="not a PDF: the object does not begin with %PDF-",
+        )
+        try:
+            with session_scope(tenant_id) as session:
+                session.add(rejected)
+        except IntegrityError:
+            with session_scope(tenant_id) as session:
+                existing = session.scalar(select(Document).where(Document.sha256 == sha256))
+            return IngestResult(
+                existing.id if existing else None, tenant_id, duplicate=True, skipped="not-a-pdf"
+            )
+        return IngestResult(rejected.id, tenant_id, skipped="not-a-pdf")
 
     with session_scope(tenant_id) as session:
         existing = session.scalar(select(Document).where(Document.sha256 == sha256))

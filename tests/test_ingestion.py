@@ -15,7 +15,7 @@ import pytest
 from docfactory_core.config import get_settings
 from docfactory_core.db import session_scope, tenant_context
 from docfactory_core.ingest import ObjectRef, ingest_object, parse_s3_events, route_key
-from docfactory_core.models import Document
+from docfactory_core.models import Document, DocumentStatus
 from sqlalchemy import delete, select
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -175,15 +175,38 @@ class TestDroppedObjectsBecomeDocuments:
         assert response.json()["duplicate"] is True
         assert response.json()["document_id"] == str(dropped_result.document_id)
 
-    def test_a_non_pdf_drop_is_ignored_rather_than_queued(self, dropped):
+    def test_a_non_pdf_drop_is_recorded_rather_than_queued(self, dropped):
+        """Not queued — but no longer silently discarded either.
+
+        This test used to assert `document_id is None`, which pinned the
+        behaviour that lost documents: nothing raised, so the SQS message was
+        deleted and the object left no row, no DLQ entry and no log a client
+        could reconcile against. The half worth keeping is that a file which is
+        not a PDF must never reach the parse queue; the half that was wrong is
+        that it should vanish.
+        """
         store, broker, _, _ = dropped
         settings = get_settings()
         key = f"{settings.default_tenant_id}/{settings.ingest_prefix}/notes.txt"
         store.put_object(key, b"just some text", content_type="text/plain")
+        before = len(broker.sent) if hasattr(broker, "sent") else None
         with tenant_context(settings.default_tenant_id):
             result = ingest_object(ObjectRef(settings.s3_bucket, key), store, broker)
+
         assert result.skipped == "not-a-pdf"
-        assert result.document_id is None
+        assert result.document_id is not None, (
+            "A non-PDF drop produced no document row, so the object is "
+            "unreconcilable: the client sent it, nothing rejected it visibly, "
+            "and nothing recorded that it arrived."
+        )
+
+        with tenant_context(settings.default_tenant_id), session_scope() as session:
+            document = session.get(Document, result.document_id)
+            assert document.status == DocumentStatus.FAILED
+            assert "PDF" in (document.last_error or "")
+
+        if before is not None:
+            assert len(broker.sent) == before, "a non-PDF file was queued for parsing"
 
     def test_the_worker_handler_consumes_a_raw_storage_event(self, dropped):
         """End to end on the message shape AWS will actually deliver."""

@@ -102,9 +102,26 @@ resource "aws_s3_bucket_lifecycle_configuration" "documents" {
   }
 }
 
-# Batch ingestion. The filter matches the drop prefix the code already routes
-# on ({tenant}/dropbox/...), so the pipeline's own artifacts — incoming
-# uploads and parsed text — never re-trigger ingestion.
+# Batch ingestion.
+#
+# The comment here used to say the filter "matches the drop prefix the code
+# already routes on ({tenant}/dropbox/...)". There is no prefix filter and
+# never was — what actually keeps the pipeline's own artifacts from
+# re-triggering ingestion is the suffix, because parsed text is written as
+# `{tenant}/parsed/{id}.txt`, plus route_key rejecting any key whose second
+# segment is not `dropbox`. Two real mechanisms, neither of them the one
+# described.
+#
+# S3 SUFFIX FILTERS ARE CASE-SENSITIVE, which is the reason for the second
+# rule. A client exporting `INVOICE.PDF` — and plenty of scanners and finance
+# systems emit uppercase extensions — generates no event at all: not a message,
+# not a row, not a log line. The object simply sits in the bucket while the
+# client believes it was sent. That is a worse failure than a rejected file,
+# because nothing anywhere records that anything arrived.
+#
+# Two rules rather than dropping the filter entirely: without any suffix
+# filter, every parsed-text write would also raise an event, and the pipeline
+# would spend an ingest receive rejecting its own output on every document.
 resource "aws_s3_bucket_notification" "documents" {
   bucket = aws_s3_bucket.documents.id
 
@@ -113,6 +130,13 @@ resource "aws_s3_bucket_notification" "documents" {
     queue_arn     = aws_sqs_queue.main["ingest"].arn
     events        = ["s3:ObjectCreated:*"]
     filter_suffix = ".pdf"
+  }
+
+  queue {
+    id            = "ingest-uppercase"
+    queue_arn     = aws_sqs_queue.main["ingest"].arn
+    events        = ["s3:ObjectCreated:*"]
+    filter_suffix = ".PDF"
   }
 
   depends_on = [aws_sqs_queue_policy.ingest_from_s3]
