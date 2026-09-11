@@ -250,5 +250,32 @@ class TestTheCounterAndTheAuditTrailAgree:
 
         # Reservations in flight would legitimately make the counter larger;
         # with none outstanding the two must be identical.
+        #
+        # DELIBERATELY AN ABSOLUTE CHECK OVER ACCUMULATED STATE, not a delta
+        # over this test's own activity. A delta was tried and is strictly
+        # worse: settle() and record_usage() are called one after the other in
+        # the worker handler, so anything a test can drive in-process moves
+        # both by zero and the assertion becomes 0 == 0 — passing whatever the
+        # code does. The value here is catching drift the system accumulated in
+        # ways nobody enumerated, which only an absolute check can see.
+        #
+        # The cost of that is this failing on a long-lived development database
+        # carrying residue from interrupted runs, killed workers and abandoned
+        # experiments. The message below exists to make that distinguishable
+        # rather than mysterious.
         if unsettled == 0:
-            assert counter == events
+            assert counter == events, (
+                f"The spend counter ({counter}) and the usage-event log ({events}) "
+                f"disagree by {counter - events} for tenant {tenant!r}, with no "
+                "reservations outstanding.\n\n"
+                "The cap is enforced against the counter and the audit trail is "
+                "the event log, so a drift means one of the two numbers a client "
+                "can be shown is wrong.\n\n"
+                "TO TELL A CODE BUG FROM DATABASE HISTORY: a drift that is "
+                "already present before you do anything, and does not grow when "
+                "you push a document through the pipeline, is residue from "
+                "earlier local runs — `make reset && make up && make migrate` "
+                "clears it. A drift that GROWS as documents are processed is the "
+                "real thing, and means settle() and record_usage() are "
+                "disagreeing in apps/worker/docfactory_worker/handlers.py."
+            )

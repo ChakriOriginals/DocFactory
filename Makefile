@@ -56,6 +56,14 @@ seed: .env
 	DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python data/synth/generate.py --type invoice --count 500 --upload --previews
 	DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib uv run python data/synth/generate.py --type purchase_order --count 120 --upload --previews
 
+## Issue (or re-issue) the local development API key and print it.
+## Idempotent, and the same key every time. Local only — the value is a fixed
+## literal that lives in the repository.
+##
+##   export KEY=$$(make -s dev-key)
+dev-key: .env
+	@uv run python scripts/dev_key.py
+
 api: .env
 	uv run uvicorn docfactory_api.main:app --port 8000
 

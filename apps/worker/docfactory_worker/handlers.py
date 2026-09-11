@@ -77,10 +77,35 @@ _broker: QueueBroker | None = None
 
 
 def _clients() -> tuple[ObjectStore, QueueBroker]:
+    """Lazily build the AWS clients, all-or-nothing.
+
+    The guard used to be `if _store is None`, which tested one global while
+    assigning two. If QueueBroker() raised after ObjectStore() had succeeded —
+    an SQS blip, a slow credential refresh, anything transient at startup —
+    `_store` stayed set and `_broker` stayed None. Every later call then saw a
+    non-None `_store`, skipped initialisation entirely, and returned a broker
+    of None. The transient failure became permanent, for the life of the
+    process.
+
+    The shape it produced was nastier than a crash. handle_parse extracts the
+    text, writes it to S3, commits status=parsed, and only then calls
+    broker.send — so the work was done and persisted before the AttributeError.
+    On redelivery the status guard sees `parsed`, logs "skipping duplicate
+    delivery" and returns cleanly, so the message is deleted and never reaches
+    a DLQ. The document sits at `parsed` forever, with nothing anywhere
+    reporting an error. Observed in local testing, not theorised:
+
+      AttributeError: 'NoneType' object has no attribute 'send'
+      ... then: "skipping duplicate delivery", status=parsed
+
+    Assigning through locals means a half-built pair is never published, so the
+    next message retries construction instead of inheriting the failure.
+    """
     global _store, _broker
-    if _store is None:
-        _store = ObjectStore()
-        _broker = QueueBroker()
+    if _store is None or _broker is None:
+        store = ObjectStore()
+        broker = QueueBroker()
+        _store, _broker = store, broker
     return _store, _broker
 
 
