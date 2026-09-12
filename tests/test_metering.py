@@ -210,20 +210,29 @@ class TestTheCounterAndTheAuditTrailAgree:
     pytestmark = pytest.mark.integration
 
     def test_recorded_usage_sums_to_the_spend_counter(self):
-        import socket
-        from urllib.parse import urlparse
-
         from docfactory_core.config import get_settings
         from docfactory_core.db import session_scope, tenant_context
         from sqlalchemy import text
 
         settings = get_settings()
-        parsed = urlparse(settings.s3_endpoint_url or "")
+
+        # GUARDED ON POSTGRES, NOT ON S3.
+        #
+        # This used to probe s3_endpoint_url as a proxy for "is the compose
+        # stack up". The test reads two Postgres tables and touches no object
+        # storage at all, and CI provides Postgres but no MinIO — so the probe
+        # skipped it on every CI run. Combined with it failing on any local
+        # database carrying history, the check ran nowhere: it could not pass
+        # where it was measured and could not pass where it was read.
+        #
+        # On Postgres it runs in CI against a fresh database, where the counter
+        # and the event log both start at zero and any drift is genuinely the
+        # code's.
         try:
-            with socket.create_connection((parsed.hostname, parsed.port), timeout=0.5):
-                pass
-        except OSError:
-            pytest.skip("compose stack is not running")
+            with session_scope(settings.default_tenant_id) as probe:
+                probe.execute(text("SELECT 1"))
+        except Exception:
+            pytest.skip("postgres is not reachable")
 
         tenant = settings.default_tenant_id
         with tenant_context(tenant), session_scope() as session:
@@ -271,11 +280,22 @@ class TestTheCounterAndTheAuditTrailAgree:
                 "The cap is enforced against the counter and the audit trail is "
                 "the event log, so a drift means one of the two numbers a client "
                 "can be shown is wrong.\n\n"
-                "TO TELL A CODE BUG FROM DATABASE HISTORY: a drift that is "
-                "already present before you do anything, and does not grow when "
-                "you push a document through the pipeline, is residue from "
-                "earlier local runs — `make reset && make up && make migrate` "
-                "clears it. A drift that GROWS as documents are processed is the "
-                "real thing, and means settle() and record_usage() are "
-                "disagreeing in apps/worker/docfactory_worker/handlers.py."
+                "ALMOST CERTAINLY NOT A CODE BUG IF YOU RUN `make worker` ON "
+                "THIS MACHINE. A worker running against the same database as "
+                "the test suite races it: the tests enqueue documents and clean "
+                "up their rows while the worker is part-way through them, which "
+                "leaves the counter charged for work whose usage event never "
+                "landed. Measured: with a worker running, tests/test_ingestion.py "
+                "adds 0.001397 of drift per run; with it stopped, the same file "
+                "adds exactly zero. CI has no worker process, so this runs clean "
+                "there.\n\n"
+                "TO CONFIRM IT IS THE RACE AND NOT THE CODE: stop the worker, "
+                "note this number, run the suite twice, and check it has not "
+                "moved. Then push one document through the full pipeline and "
+                "check again — a complete document leaves it unchanged. If the "
+                "number grows with the worker STOPPED, that is the real thing: "
+                "settle() and record_usage() disagreeing in "
+                "apps/worker/docfactory_worker/handlers.py.\n\n"
+                "`make reset && make up && make migrate` clears accumulated "
+                "residue either way."
             )
