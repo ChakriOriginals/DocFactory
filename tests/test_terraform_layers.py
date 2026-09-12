@@ -517,3 +517,55 @@ def test_the_cross_layer_read_points_at_the_same_place_the_state_lives() -> None
         f"compute-plane reads state from {read_bucket.group(1)} but data-plane "
         f"writes it to {bucket.group(1)}."
     )
+
+
+# --- A check that cannot look must not answer -------------------------------
+
+
+def test_the_parked_probe_does_not_swallow_its_own_errors() -> None:
+    """`2>/dev/null || echo NONE` disabled deployment entirely, and silently.
+
+    The CI role was missing ecs:DescribeClusters. The probe was AccessDenied on
+    every run, the error went to /dev/null, the NONE fallback was read as
+    "parked", and the deploy was skipped with the stack running — reporting
+    success each time. The gate protected nothing and stopped every release.
+
+    scripts/aws_orphan_check.sh already states the rule in its header: a check
+    that cannot distinguish "nothing there" from "I could not look" is worse
+    than no check, because it is trusted. It was written there and then not
+    applied here.
+    """
+    workflow = WORKFLOW.read_text()
+    gate_start = workflow.index("Is the compute plane up, or parked?")
+    block = workflow[gate_start : workflow.index("- id: ecr", gate_start)]
+
+    # Comments stripped before matching. The comment above the fix quotes the
+    # broken line verbatim in order to explain it, so a plain substring search
+    # finds the explanation and fails against correct code. Third time this
+    # session a guard matched prose instead of source — _strip_comments exists
+    # in this file for exactly that reason.
+    gate = _strip_comments(block)
+
+    assert "|| echo NONE" not in gate, (
+        "The parked probe falls back to a literal on failure again. A denied or "
+        "throttled call then reads as 'parked' and silently skips the deploy."
+    )
+    assert "probe_exit" in gate and "exit 1" in gate, (
+        "The probe no longer fails the job when it cannot determine the answer. "
+        "Refusing to deploy on an unknown answer is defensible; inventing "
+        "'parked' is not."
+    )
+
+
+def test_the_deploy_role_can_run_the_probe_it_depends_on() -> None:
+    """The grant and the check have to move together.
+
+    Either one without the other reproduces the original bug: the workflow asks
+    a question the role cannot answer.
+    """
+    iam = (DATA_PLANE / "iam.tf").read_text()
+    assert "ecs:DescribeClusters" in iam, (
+        "The CI deploy role can no longer describe the cluster, but the deploy "
+        "workflow asks whether it is parked before building. The probe will "
+        "fail on every run."
+    )

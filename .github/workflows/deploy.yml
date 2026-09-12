@@ -159,8 +159,40 @@ jobs:
       - id: cluster
         name: Is the compute plane up, or parked?
         run: |
-          cluster_status=$(aws ecs describe-clusters --clusters "$CLUSTER" --region "$AWS_REGION" \
-            --query 'clusters[0].status' --output text 2>/dev/null || echo NONE)
+          # THREE OUTCOMES, NEVER TWO: up, parked, or "the check itself failed".
+          #
+          # This used to be `... 2>/dev/null || echo NONE`, which collapsed the
+          # third case into the second. The CI role was missing
+          # ecs:DescribeClusters, so the call was AccessDenied on every run, the
+          # error went to /dev/null, NONE was read as "parked", and the deploy
+          # was skipped — silently, with the stack running, every single time.
+          # The gate did not protect anything; it disabled deployment and
+          # reported success.
+          #
+          # scripts/aws_orphan_check.sh already carries this lesson in its
+          # header: "a check that cannot distinguish 'nothing there' from 'I
+          # could not look' is worse than no check, because it is trusted."
+          # Written there, then not applied here.
+          #
+          # A failed check now fails the job. Refusing to deploy because the
+          # answer is unknown is defensible; pretending the answer was "parked"
+          # is not.
+          set +e
+          cluster_status=$(aws ecs describe-clusters --clusters "$CLUSTER" \
+            --region "$AWS_REGION" --query 'clusters[0].status' --output text 2>/tmp/ecs_err)
+          probe_exit=$?
+          set -e
+          if [ "$probe_exit" -ne 0 ]; then
+            echo "::error::Could not determine whether the compute plane is up."
+            sed 's/^/  /' /tmp/ecs_err
+            echo
+            echo "This is NOT the same as 'the stack is parked', and is not"
+            echo "treated as such. Most likely the deploy role is missing"
+            echo "ecs:DescribeClusters. Fix the permission and re-run; nothing"
+            echo "was built or deployed."
+            exit 1
+          fi
+
           # A cluster that never existed comes back as None with a failures
           # entry, a destroyed one as INACTIVE. Neither is a deployable target.
           if [ "$cluster_status" = "ACTIVE" ]; then

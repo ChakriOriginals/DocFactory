@@ -422,6 +422,13 @@ data "aws_iam_policy_document" "github_deploy" {
       "ecs:UpdateService",
       "ecs:RunTask",
       "ecs:DescribeTasks",
+      # The workflow asks whether the compute plane is parked before it builds
+      # anything. Without this the call is AccessDenied, and the gate — which
+      # could not tell a denied call from an absent cluster — concluded
+      # "parked" and skipped every deploy, silently, including with the stack
+      # running. Both halves are fixed: the grant here, and the gate no longer
+      # treating a failed call as an answer.
+      "ecs:DescribeClusters",
     ]
     resources = ["*"]
   }
