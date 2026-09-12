@@ -145,6 +145,20 @@ class Settings(BaseSettings):
     max_in_flight_per_tenant: int = 25
     # How long a deferred message waits before it is eligible again.
     defer_seconds: int = 5
+    # How many times one message may be deferred before it is admitted anyway.
+    # WITHOUT THIS THE CEILING LIVELOCKS. The ceiling counts queued statuses
+    # (received, parsed), and a message is deferred *before* its status moves,
+    # so every document a tenant holds is counted against every other one. Past
+    # the ceiling nothing can advance: each document waits for the others to
+    # leave a status only this gate could have moved them out of. Deferral
+    # re-sends and acknowledges, so the receive count resets and the DLQ never
+    # catches it. Reachable on these very defaults — rate_limit_burst (30)
+    # admits more at once than max_in_flight_per_tenant (25) allows through.
+    #
+    # 0 or less admits immediately and so turns the ceiling off, the same way
+    # max_in_flight_per_tenant <= 0 does in backpressure.admits. Deliberate: the
+    # two knobs disable the same mechanism and should read the same way.
+    max_defer_attempts: int = 10
 
     # Fitted confidence model consumed by routing. The threshold lives inside
     # this file, never in code, so a refit changes behaviour by swapping the

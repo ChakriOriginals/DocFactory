@@ -72,6 +72,12 @@ from opentelemetry import trace
 log = logging.getLogger(__name__)
 tracer = trace.get_tracer("docfactory")
 
+# How many times this message has been deferred for backpressure. Carried in
+# the payload rather than the database because a deferral is a property of the
+# message, not of the document — see `_defer_if_saturated`. Mirrors
+# `healing.REDRIVE_KEY`, which bounds the other re-send loop in this system.
+DEFER_KEY = "_defer_attempt"
+
 _store: ObjectStore | None = None
 _broker: QueueBroker | None = None
 
@@ -510,18 +516,69 @@ def _defer_if_saturated(payload: dict, queue: str, tenant_id: str, document_id: 
     Deferral is not failure — the message is re-sent rather than left to
     redeliver, so it never counts against the redrive policy and can never
     reach the DLQ for being busy.
+
+    BOUNDED, BECAUSE THE UNBOUNDED VERSION LIVELOCKED.
+
+    This gate runs before the status transition, and the ceiling counts queued
+    statuses (`received`, `parsed`) as well as active ones. So a tenant's
+    documents are counted against each other while every one of them is still
+    waiting for this same gate: past the ceiling, each defers because of the
+    others, and none can reach the status write that would release the rest.
+    Nothing escalates. The re-send acknowledges the original, so the receive
+    count resets to zero and `maxReceiveCount` never fires — by design, per the
+    paragraph above, which means no DLQ and therefore no DLQ alarm. The only
+    outward sign is the backlog alarm holding workers up on a tenant making no
+    progress, which reads as load rather than as a stall.
+
+    Reachable on stock settings: `rate_limit_burst` (30) admits a burst larger
+    than `max_in_flight_per_tenant` (25) lets through.
+
+    The bound is the same shape as `redrive_dlq`'s: count the attempts in the
+    payload, and once they run out stop being clever and let the work through.
+
+    WHAT THIS COSTS, STATED PLAINLY. Under a sustained backlog every message
+    spends its full budget and is then admitted, so past the ceiling this stops
+    being a cap and becomes a fixed delay — `max_defer_attempts` times `defer_seconds`,
+    about 50s on the defaults — after which the tenant proceeds anyway. That is
+    the deliberate trade. The ceiling's purpose is to make a flood yield the
+    worker to somebody else, which this still does for the first ten laps, and
+    per-tenant counting already keeps a neighbour unblocked regardless. A
+    control that merely slows a tenant down is worth having; one that can stop
+    its work permanently is not, and the unbounded version could do exactly that.
     """
     if admits(tenant_id, exclude_document=str(document_id)):
         return False
+
+    settings = get_settings()
+    attempt = int(payload.get(DEFER_KEY, 0))
+    if attempt >= settings.max_defer_attempts:
+        # Deliberately louder than the deferral itself: the ceiling is being
+        # exceeded on purpose, and an operator seeing this repeatedly has a
+        # tenant whose work cannot drain at the configured limit.
+        log.warning(
+            "admitted over the in-flight ceiling: deferral bound reached",
+            extra={
+                "tenant_id": tenant_id,
+                "queue": queue,
+                "document_id": str(document_id),
+                "attempts": attempt,
+                "in_flight": in_flight(tenant_id),
+                "limit": settings.max_in_flight_per_tenant,
+            },
+        )
+        return False
+
+    payload[DEFER_KEY] = attempt + 1
     _, broker = _clients()
-    broker.send(queue, payload, delay_seconds=get_settings().defer_seconds)
+    broker.send(queue, payload, delay_seconds=settings.defer_seconds)
     log.info(
         "deferred: tenant at its in-flight ceiling",
         extra={
             "tenant_id": tenant_id,
             "queue": queue,
+            "attempt": attempt + 1,
             "in_flight": in_flight(tenant_id),
-            "limit": get_settings().max_in_flight_per_tenant,
+            "limit": settings.max_in_flight_per_tenant,
         },
     )
     return True

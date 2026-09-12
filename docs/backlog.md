@@ -123,10 +123,20 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
   Every tenant gets the same bucket size and the same ceiling. Per-tenant
   overrides belong on the `tenants` row next to `budget_usd` and
   `review_sla_hours`, which already work that way.
-- **A deferred message loses its receive count.** Deferral re-sends rather than
-  letting the message redeliver, which is deliberate — being busy must never
-  fill the DLQ — but it also means a document that is deferred forever would
-  never reach the DLQ. A deferral counter on the payload would bound it.
+- **The in-flight ceiling is a delay under sustained load, not a cap.** A
+  deferred message now carries a counter (`_defer_attempt`) and is admitted once
+  it is spent. That bound is load-bearing: deferral re-sends rather than letting
+  the message redeliver — deliberate, since being busy must never fill the DLQ —
+  so nothing escalates, and without the counter a tenant past the ceiling
+  deadlocked itself. Its documents were counted against each other while every
+  one of them waited on the same gate, which runs before the status write that
+  would have released the rest. The cost is that a tenant with a standing
+  backlog spends the budget on every message and is then let through, so past
+  the ceiling this buys about `max_defer_attempts` times `defer_seconds` of
+  delay rather than a limit. Per-tenant counting still keeps a neighbour
+  unblocked throughout. A true cap needs the gate to stop counting queued work,
+  or admission granted by something with a view of the whole tenant rather than
+  one message at a time.
 - **Ingestion assumes one object is one document.** No zip/multi-page-batch
   unpacking, and a non-PDF drop is logged and dropped rather than reported
   anywhere the tenant can see. A per-tenant ingestion error surface is a real
