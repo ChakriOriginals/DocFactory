@@ -13,7 +13,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from docfactory_core.db import admin_session_scope
+from docfactory_core.db import admin_session_scope, tenant_context
 from docfactory_core.healing import (
     REDRIVE_KEY,
     heal,
@@ -560,3 +560,258 @@ class TestConsumerSupervision:
         stop.set()
         supervisor.join(timeout=2)
         alive.join(timeout=2)
+
+
+class TestTheRescueCycleEnds:
+    """A document the pipeline cannot process must end, visibly -- and only then.
+
+    The reaper re-enqueued on `status NOT IN TERMINAL AND updated_at < cutoff`
+    and wrote nothing, so a document failing at a site no handler guarded --
+    `put_object` of the parsed text, which an S3 permission problem on the
+    parsed/ prefix reaches -- stayed at `parsing` and was rescued every sweep,
+    forever. Reproduced before fixing: three deliveries including the final one
+    left it at `parsing`, and three consecutive sweeps each took it again.
+
+    The opposite failure is just as real and is tested just as hard: a fix that
+    terminalizes on the last delivery kills documents over a 30-second blip.
+    """
+
+    GIVE_UP_AFTER = 3
+
+    @staticmethod
+    def _stub_worker(monkeypatch, storage: dict):
+        """The real parse handler over storage whose PUT fails while storage['down']."""
+        from docfactory_worker import handlers
+
+        class Store:
+            def get_object(self, key):
+                return b"%PDF-1.4 pretend"
+
+            def put_object(self, *args, **kwargs):
+                if storage["down"]:
+                    raise RuntimeError("AccessDenied: parsed/ prefix")
+
+        broker = RecordingBroker()
+        monkeypatch.setattr(handlers, "_clients", lambda: (Store(), broker))
+        # Parsing itself is not under test; the unguarded failure site after it is.
+        monkeypatch.setattr(handlers, "extract_pdf_text", lambda body: "text " * 200)
+        return handlers
+
+    @staticmethod
+    def _age(document_id, age: timedelta = timedelta(hours=1)):
+        """Stand in for the stale window elapsing between sweeps.
+
+        Every write refreshes updated_at, so without this a sweep would skip the
+        document for being recent -- and a loop test would pass for the wrong
+        reason.
+        """
+        with admin_session_scope() as session:
+            session.execute(
+                text("UPDATE documents SET updated_at = :when WHERE id = :id"),
+                {"when": datetime.now(UTC) - age, "id": str(document_id)},
+            )
+
+    @staticmethod
+    def _row(document_id) -> Document:
+        with admin_session_scope() as session:
+            document = session.get(Document, document_id)
+            session.expunge(document)
+            return document
+
+    @staticmethod
+    def _deliver_three_times(handlers, document_id):
+        payload = {"document_id": str(document_id), "tenant_id": TENANT}
+        for receive in (1, 2, 3):
+            with pytest.raises(RuntimeError):
+                handlers.handle_parse(payload, receive_count=receive, final_attempt=receive >= 3)
+
+    def _worker_sweep(self, document_id):
+        self._age(document_id)
+        return reap_stuck_documents(
+            RecordingBroker(),
+            stale_after=timedelta(minutes=15),
+            give_up_after=self.GIVE_UP_AFTER,
+        )
+
+    def test_exhausted_deliveries_do_not_kill_the_document(self, monkeypatch):
+        """Thirty seconds of trouble is not a verdict. The reason is recorded."""
+        handlers = self._stub_worker(monkeypatch, {"down": True})
+        document_id = make_document(DocumentStatus.RECEIVED, age=timedelta(hours=1))
+
+        self._deliver_three_times(handlers, document_id)
+
+        row = self._row(document_id)
+        assert row.status == DocumentStatus.PARSING, (
+            "the final delivery must not terminalize: the reaper and the DLQ "
+            "redrive both refuse FAILED rows, so a blip would be permanent"
+        )
+        assert row.last_error == "parse: AccessDenied: parsed/ prefix", (
+            "an unguarded failure site must still say why it failed"
+        )
+
+    def test_a_document_that_fails_every_rescue_is_given_up_visibly(self, monkeypatch):
+        """The regression test for the loop itself."""
+        handlers = self._stub_worker(monkeypatch, {"down": True})
+        document_id = make_document(DocumentStatus.RECEIVED, age=timedelta(hours=1))
+        self._deliver_three_times(handlers, document_id)
+
+        rescued = 0
+        for _ in range(self.GIVE_UP_AFTER):
+            report = self._worker_sweep(document_id)
+            # Anchor: the sweep really did take this document. Without it, a
+            # sweep that saw nothing at all would satisfy the assertions below.
+            assert str(document_id) in report.document_ids
+            rescued += 1
+            self._deliver_three_times(handlers, document_id)
+        assert rescued == self.GIVE_UP_AFTER
+
+        final = self._worker_sweep(document_id)
+        assert final.gave_up == 1 and str(document_id) not in final.document_ids
+
+        row = self._row(document_id)
+        assert row.status == DocumentStatus.FAILED
+        assert row.reap_count == self.GIVE_UP_AFTER + 1
+        assert "gave up after 3 recovery attempts" in row.last_error
+        assert "AccessDenied: parsed/ prefix" in row.last_error, (
+            "the tenant and the operator must see the cause, not just the verdict"
+        )
+
+        after = self._worker_sweep(document_id)
+        assert str(document_id) not in after.document_ids and after.gave_up == 0
+
+    def test_a_blip_is_recovered_by_the_next_rescue(self, monkeypatch):
+        storage = {"down": True}
+        handlers = self._stub_worker(monkeypatch, storage)
+        document_id = make_document(DocumentStatus.RECEIVED, age=timedelta(hours=1))
+        self._deliver_three_times(handlers, document_id)
+
+        storage["down"] = False
+        report = self._worker_sweep(document_id)
+        assert str(document_id) in report.document_ids
+        handlers.handle_parse({"document_id": str(document_id), "tenant_id": TENANT})
+
+        assert self._row(document_id).status == DocumentStatus.PARSED
+
+    def test_the_api_sweep_never_counts_and_never_gives_up(self):
+        """The API sweeps to wake a fleet at zero, when every rescue looks failed."""
+        document_id = make_document(DocumentStatus.RECEIVED, age=timedelta(hours=1))
+
+        for _ in range(self.GIVE_UP_AFTER + 3):
+            self._age(document_id)
+            report = reap_stuck_documents(
+                RecordingBroker(), stale_after=timedelta(minutes=15), stages={"parse"}
+            )
+            assert str(document_id) in report.document_ids
+
+        row = self._row(document_id)
+        assert row.status == DocumentStatus.RECEIVED and row.reap_count == 0
+
+    def test_a_budget_pause_is_never_counted_toward_giving_up(self):
+        """Its rescue polls for budget; failing it would destroy paused work."""
+        from docfactory_core.budget import budget_state
+
+        document_id = make_document(DocumentStatus.BUDGET_EXCEEDED, age=timedelta(hours=1))
+        with tenant_context(TENANT):
+            assert not budget_state(TENANT).exceeded, "precondition: budget has headroom"
+
+        for _ in range(self.GIVE_UP_AFTER + 2):
+            report = self._worker_sweep(document_id)
+            assert str(document_id) in report.document_ids
+
+        row = self._row(document_id)
+        assert row.status == DocumentStatus.BUDGET_EXCEEDED and row.reap_count == 0
+
+    def test_back_to_back_sweeps_rescue_a_document_once(self):
+        """The claim is what lets several workers sweep at the same time."""
+        document_id = make_document(DocumentStatus.RECEIVED, age=timedelta(hours=1))
+        broker = RecordingBroker()
+
+        first = reap_stuck_documents(
+            broker, stale_after=timedelta(minutes=15), give_up_after=self.GIVE_UP_AFTER
+        )
+        second = reap_stuck_documents(
+            broker, stale_after=timedelta(minutes=15), give_up_after=self.GIVE_UP_AFTER
+        )
+
+        assert str(document_id) in first.document_ids
+        assert str(document_id) not in second.document_ids
+        assert [p["document_id"] for _, p in broker.sent].count(str(document_id)) == 1
+
+    def test_a_failure_after_routing_does_not_stamp_the_routed_document(self):
+        from docfactory_worker import handlers
+
+        document_id = make_document(DocumentStatus.NEEDS_REVIEW, age=timedelta(hours=1))
+        with tenant_context(TENANT):
+            handlers._note_failure(document_id, "extract: late bookkeeping blew up")
+        routed = self._row(document_id)
+        assert routed.status == DocumentStatus.NEEDS_REVIEW and routed.last_error is None
+
+        # Control, so the assertion above cannot pass because nothing ever writes.
+        live_id = make_document(DocumentStatus.PARSING, age=timedelta(hours=1))
+        with tenant_context(TENANT):
+            handlers._note_failure(live_id, "parse: it did write")
+        assert self._row(live_id).last_error == "parse: it did write"
+
+    def test_a_deferred_document_is_not_mistaken_for_a_stranded_one(self, monkeypatch):
+        """A provider outage must not spend a document's rescues, or duplicate it."""
+        from docfactory_worker import handlers
+
+        class OpenBreaker:
+            state = "open"
+            cooldown = timedelta(seconds=60)
+
+        monkeypatch.setattr(handlers, "_model_breaker", lambda: OpenBreaker())
+        monkeypatch.setattr(handlers, "_clients", lambda: (None, RecordingBroker()))
+        document_id = make_document(DocumentStatus.PARSED, age=timedelta(hours=1))
+
+        with tenant_context(TENANT):
+            assert handlers._defer_if_provider_down(
+                {"document_id": str(document_id), "tenant_id": TENANT},
+                "docfactory-extract",
+                document_id,
+            )
+
+        report = reap_stuck_documents(
+            RecordingBroker(), stale_after=timedelta(minutes=15), give_up_after=self.GIVE_UP_AFTER
+        )
+        assert str(document_id) not in report.document_ids
+        assert self._row(document_id).reap_count == 0
+
+    def test_every_document_handler_records_its_failures(self):
+        """Any handle_* taking a document payload, including one added later."""
+        import inspect
+
+        from docfactory_worker import handlers
+
+        document_handlers = {
+            name: fn
+            for name, fn in inspect.getmembers(handlers, inspect.isfunction)
+            if name.startswith("handle_") and name != "handle_ingest"
+        }
+        assert {"handle_parse", "handle_extract"} <= set(document_handlers)
+        for name, fn in document_handlers.items():
+            assert getattr(fn, "_records_failure", None), (
+                f"{name} must be wrapped by records_failure, or a document the "
+                "reaper gives up on will not say why"
+            )
+
+    def test_a_document_deferred_by_the_ceiling_is_not_mistaken_for_stranded(self, monkeypatch):
+        from docfactory_worker import handlers
+
+        monkeypatch.setattr(handlers, "admits", lambda *a, **k: False)
+        monkeypatch.setattr(handlers, "in_flight", lambda *a, **k: 99)
+        monkeypatch.setattr(handlers, "_clients", lambda: (None, RecordingBroker()))
+        document_id = make_document(DocumentStatus.RECEIVED, age=timedelta(hours=1))
+
+        with tenant_context(TENANT):
+            assert handlers._defer_if_saturated(
+                {"document_id": str(document_id), "tenant_id": TENANT},
+                "docfactory-parse",
+                TENANT,
+                document_id,
+            )
+
+        report = reap_stuck_documents(
+            RecordingBroker(), stale_after=timedelta(minutes=15), give_up_after=self.GIVE_UP_AFTER
+        )
+        assert str(document_id) not in report.document_ids

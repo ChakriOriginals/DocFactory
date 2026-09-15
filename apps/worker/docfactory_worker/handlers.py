@@ -48,6 +48,7 @@ from docfactory_core.extraction import (
     build_user_message,
     run_extraction,
 )
+from docfactory_core.healing import TERMINAL
 from docfactory_core.ingest import ingest_object, parse_s3_events, route_key
 from docfactory_core.llm import get_llm_client
 from docfactory_core.metering import PURPOSE_ESCALATION, PURPOSE_EXTRACT, record_usage
@@ -68,6 +69,7 @@ from docfactory_core.routing import default_policy, escalation_trigger, model_fo
 from docfactory_core.storage import ObjectStore
 from docfactory_core.tracing import extract_trace_context, inject_trace_context
 from opentelemetry import trace
+from sqlalchemy import func, update
 
 log = logging.getLogger(__name__)
 tracer = trace.get_tracer("docfactory")
@@ -132,6 +134,96 @@ def tenant_scoped(handler):
     return wrapper
 
 
+def _document_id_of(payload: dict) -> uuid.UUID | None:
+    """The document this message is about, or None if it is not about one."""
+    try:
+        return uuid.UUID(str(payload["document_id"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def records_failure(stage: str):
+    """Write the cause of ANY uncaught exception onto the document row.
+
+    This records; it does not decide. Whether a document is dead is the
+    reaper's call (`healing.reap_stuck_documents`, `give_up_after`), made after
+    an hour of rescues rather than here after thirty seconds of deliveries.
+    Terminalizing on the last delivery would turn a storage or database blip
+    into a FAILED document that nothing recovers.
+
+    What this buys is the reason. Only three failure sites wrote `last_error`
+    by hand; `put_object` of the parsed text and every status write after it did
+    not, so a document the reaper gave up on would have said nothing about why.
+    Wrapping the body makes that structural rather than remembered. The tenant
+    is re-bound so the decorator order is not load-bearing.
+    """
+
+    def decorate(handler):
+        @functools.wraps(handler)
+        def wrapper(payload: dict, **kwargs):
+            try:
+                return handler(payload, **kwargs)
+            except Exception as exc:
+                document_id = _document_id_of(payload)
+                if document_id is not None:
+                    tenant_id = payload.get("tenant_id") or get_settings().default_tenant_id
+                    with tenant_context(tenant_id):
+                        _note_failure(document_id, f"{stage}: {exc}")
+                raise
+
+        wrapper._records_failure = stage
+        return wrapper
+
+    return decorate
+
+
+def _note_failure(document_id: uuid.UUID, error: str) -> None:
+    """Record why a delivery failed, without touching status.
+
+    Terminal rows are left alone: an exception after a document was already
+    routed -- `ensure_review_task` failing after `needs_review` committed -- is
+    a bookkeeping error, and stamping it onto a successfully routed document
+    would make the API report a success as a failure.
+    """
+    try:
+        with session_scope() as session:
+            session.execute(
+                update(Document)
+                .where(
+                    Document.id == document_id,
+                    Document.status.notin_([status.value for status in TERMINAL]),
+                )
+                .values(last_error=error[:2000])
+            )
+    except Exception:
+        log.exception("could not record failure on document row")
+
+
+def _touch_document(document_id: uuid.UUID) -> None:
+    """Mark a deferred document as alive, so the reaper does not rescue it.
+
+    The reaper's premise is that a stale non-terminal row has no message. A
+    deferral re-sends the message and writes nothing, so during a provider
+    outage or a tenant flood every deferred document went stale while its
+    message was very much alive: the reaper added a duplicate per document per
+    sweep, each of which deferred in turn, and -- now that rescues are counted
+    -- would have spent those documents' rescue budget on an outage that was not
+    theirs. Database clock, like every other write to this column.
+    """
+    try:
+        with session_scope() as session:
+            session.execute(
+                update(Document)
+                .where(
+                    Document.id == document_id,
+                    Document.status.notin_([status.value for status in TERMINAL]),
+                )
+                .values(updated_at=func.now())
+            )
+    except Exception:
+        log.exception("could not refresh a deferred document")
+
+
 def handle_ingest(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     """A document dropped into a tenant's storage prefix.
 
@@ -161,6 +253,7 @@ def handle_ingest(payload: dict, *, receive_count: int = 1, final_attempt: bool 
 
 
 @tenant_scoped
+@records_failure("parse")
 def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
     tenant_id = current_tenant.get()
@@ -224,6 +317,7 @@ def handle_parse(payload: dict, *, receive_count: int = 1, final_attempt: bool =
 
 
 @tenant_scoped
+@records_failure("extract")
 def handle_extract(payload: dict, *, receive_count: int = 1, final_attempt: bool = False) -> None:
     document_id = uuid.UUID(payload["document_id"])
     store, _ = _clients()
@@ -571,6 +665,7 @@ def _defer_if_saturated(payload: dict, queue: str, tenant_id: str, document_id: 
     payload[DEFER_KEY] = attempt + 1
     _, broker = _clients()
     broker.send(queue, payload, delay_seconds=settings.defer_seconds)
+    _touch_document(document_id)
     log.info(
         "deferred: tenant at its in-flight ceiling",
         extra={
@@ -614,6 +709,7 @@ def _defer_if_provider_down(payload: dict, queue: str, document_id: uuid.UUID) -
     _, broker = _clients()
     delay = min(int(breaker.cooldown.total_seconds()), 900)
     broker.send(queue, payload, delay_seconds=delay)
+    _touch_document(document_id)
     log.warning(
         "deferred: model provider circuit is open",
         extra={"document_id": str(document_id), "queue": queue, "retry_in_s": delay},

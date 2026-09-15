@@ -81,8 +81,30 @@ Later-phase work spotted during earlier phases. Do not build ahead of phase.
   rather than per-type configuration, so the invoice set stays at 100 and the
   smaller purchase-order corpus yields 40. If a corpus is ever generated much
   smaller than its golden size, that cap is what will surprise someone.
-- **README still describes Phase 0.** It predates every phase since; the
-  quickstart commands work but the state description does not.
+
+## From Phase 4f (self-healing)
+
+- **A budget-paused document is polled every 15 minutes while the tenant has
+  some budget left but not enough for the next call.** The reaper skips a
+  `budget_exceeded` document only when `spent >= budget`, but `reserve` refuses
+  when `spent + worst_case > budget`. In the gap between the two, the reaper
+  re-enqueues the document, extraction pauses it again, and the cycle repeats
+  once per stale window. It is bounded in rate (one message and a few writes per
+  document per 15 minutes) and never counted toward giving up, so it wastes
+  little and destroys nothing. Closing it needs the reaper to know the
+  document's worst-case cost, which today is only computed at call time.
+- **`reap_count` is cumulative and never reset on progress.** A document
+  rescued twice at parse and three times at extract has used all five. Reading
+  it as "rescues this document has needed" is defensible; resetting it on each
+  status advance would be more generous, but adds a write every handler would
+  have to remember.
+- **Retrying a given-up document is a manual SQL reset.** The runbook has the
+  statement. An operator endpoint (or `make retry DOCUMENT=…`) would be the
+  proper surface once there is more than one operator.
+- **The reaper's stale cutoff is computed from the sweeping process's clock**,
+  while `updated_at` is written by the database's. Skew beyond the 15-minute
+  threshold would make it rescue live documents early, or hide stuck ones late.
+  Computing the cutoff in SQL (`now() - interval`) would remove the second clock.
 
 ## From Phase 4c
 

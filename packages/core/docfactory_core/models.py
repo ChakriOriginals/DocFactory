@@ -184,6 +184,9 @@ class Document(ColumnsMixin, Base):
     text_s3_key: Mapped[str | None] = mapped_column(Text)
     text_chars: Mapped[int | None] = mapped_column(Integer)
     last_error: Mapped[str | None] = mapped_column(Text)
+    # Rescues by the worker's healer. The bound that ends a retry cycle for a
+    # document no handler managed to fail cleanly -- see healing.reap_stuck_documents.
+    reap_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

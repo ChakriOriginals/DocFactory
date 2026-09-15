@@ -32,7 +32,7 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
 from docfactory_core.config import get_settings
 from docfactory_core.db import session_scope, tenant_context
@@ -96,6 +96,11 @@ class ReapReport:
     # reap_stuck_documents. Counted rather than ignored so a sweeper that is
     # permitted to fix nothing is distinguishable from one with nothing to fix.
     skipped_stage: int = 0
+    # Counting sweeps only (give_up_after set). `gave_up` documents were marked
+    # FAILED after exhausting their rescues; `raced` were claimed by another
+    # sweeper between this one's scan and its claim, and left to that sweeper.
+    gave_up: int = 0
+    raced: int = 0
     by_status: dict[str, int] = field(default_factory=dict)
     document_ids: list[str] = field(default_factory=list)
 
@@ -120,6 +125,7 @@ def reap_stuck_documents(
     now: datetime | None = None,
     limit: int = 200,
     stages: Collection[str] | None = None,
+    give_up_after: int | None = None,
 ) -> ReapReport:
     """Re-enqueue documents stranded in a non-terminal state with no message.
 
@@ -149,6 +155,33 @@ def reap_stuck_documents(
     Documents whose stage is excluded are counted in `skipped_stage` rather
     than silently passed over, so a caller that is quietly reaping nothing is
     visible instead of merely quiet.
+
+    `give_up_after` is the bound, and only the worker's healer passes it.
+
+    Without it this sweep has no end for a document that fails the same way on
+    every rescue: it writes nothing to the row, so a document stuck at
+    `parsing` behind an unguarded failure -- `put_object` of the parsed text on
+    a bucket-policy problem -- was re-enqueued every sweep, forever. With it,
+    each rescue is CLAIMED by a conditional UPDATE that increments `reap_count`
+    and refreshes `updated_at`, and the message is sent inside that transaction,
+    so a failed send rolls the claim back. Past `give_up_after` rescues the
+    document is marked FAILED with the reason instead of sent again.
+
+    Why the count lives on the row and is not decided by the handler: a handler
+    that failed its last delivery has seen about thirty seconds of trouble, and
+    terminalizing there turns a brief S3 or database blip into a dead document
+    that neither this sweep nor the DLQ redrive will ever touch. A rescue waits
+    out `stale_after` first, so the bound measures an hour of failure, not a
+    blip.
+
+    Why only the worker counts: the API runs this sweep to wake a fleet that is
+    scaled to zero, and while nothing consumes, every rescue looks like a failed
+    one. A worker running the sweep is itself proof the fleet is up. The claim
+    also means two workers sweeping at once cannot both send the same document.
+
+    `budget_exceeded` documents are never counted. Their rescue is a poll for
+    budget, not a retry of a failure, and giving up on them would destroy work
+    the cap exists to pause safely.
     """
     settings = get_settings()
     stale_after = stale_after or timedelta(minutes=15)
@@ -196,17 +229,53 @@ def reap_stuck_documents(
                         report.skipped_budget += 1
                         continue
 
-            with tenant_context(owner):
-                broker.send(
-                    _queue_for(stage),
-                    inject_trace_context(
-                        {
-                            "document_id": str(document_id),
-                            "tenant_id": owner,
-                            "_reaped": True,
-                        }
-                    ),
-                )
+            message = inject_trace_context(
+                {"document_id": str(document_id), "tenant_id": owner, "_reaped": True}
+            )
+            if give_up_after is None or status == DocumentStatus.BUDGET_EXCEEDED:
+                with tenant_context(owner):
+                    broker.send(_queue_for(stage), message)
+            else:
+                with tenant_context(owner), session_scope() as session:
+                    claimed = session.execute(
+                        update(Document)
+                        .where(
+                            Document.id == document_id,
+                            Document.updated_at < cutoff,
+                            Document.status.notin_([s.value for s in TERMINAL]),
+                        )
+                        .values(reap_count=Document.reap_count + 1, updated_at=func.now())
+                        .returning(Document.reap_count, Document.last_error)
+                    ).first()
+                    if claimed is None:
+                        report.raced += 1
+                        continue
+                    rescues, last_error = claimed
+                    if rescues > give_up_after:
+                        reason = (
+                            f"gave up after {give_up_after} recovery attempts at stage "
+                            f"'{stage}'; last error: {last_error or 'none recorded'}"
+                        )
+                        session.execute(
+                            update(Document)
+                            .where(Document.id == document_id)
+                            .values(status=DocumentStatus.FAILED, last_error=reason[:2000])
+                        )
+                        report.gave_up += 1
+                        log.error(
+                            "gave up on a document the reaper could not recover",
+                            extra={
+                                "document_id": str(document_id),
+                                "tenant_id": owner,
+                                "status": str(status),
+                                "rescues": give_up_after,
+                                "last_error": last_error,
+                            },
+                        )
+                        continue
+                    # Inside the claim's transaction: if the send raises, the
+                    # claim rolls back and the next sweep tries again.
+                    broker.send(_queue_for(stage), message)
             report.requeued += 1
             report.by_status[str(status)] = report.by_status.get(str(status), 0) + 1
             report.document_ids.append(str(document_id))
@@ -221,13 +290,14 @@ def reap_stuck_documents(
                 },
             )
 
-    if report.requeued or report.skipped_budget:
+    if report.requeued or report.skipped_budget or report.gave_up:
         log.info(
             "reaper finished",
             extra={
                 "scanned": report.scanned,
                 "requeued": report.requeued,
                 "skipped_budget": report.skipped_budget,
+                "gave_up": report.gave_up,
                 "settings_extract_queue": settings.extract_queue,
             },
         )
@@ -335,13 +405,18 @@ def heal(broker, *, stale_after: timedelta | None = None) -> dict:
     numbers lie about how much was actually stranded.
     """
     redrives = redrive_all(broker)
-    reaped = reap_stuck_documents(broker, stale_after=stale_after)
+    reaped = reap_stuck_documents(
+        broker,
+        stale_after=stale_after,
+        give_up_after=get_settings().max_reap_attempts,
+    )
     return {
         "redriven": sum(report.moved for report in redrives),
         "exhausted": sum(report.exhausted for report in redrives),
         "requeued": reaped.requeued,
         "scanned": reaped.scanned,
         "skipped_budget": reaped.skipped_budget,
+        "gave_up": reaped.gave_up,
     }
 
 

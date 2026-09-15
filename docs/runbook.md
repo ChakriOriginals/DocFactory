@@ -36,6 +36,7 @@ receives rather than reasons. So the classification happens in process
 | Corrupt or non-PDF document | permanent by classification; it fails fast to the DLQ rather than burning three retries | inspect the DLQ, fix the source |
 | Extraction that will not satisfy the schema | permanent after the built-in schema retry | look at the document; it is usually genuinely odd |
 | Image-only PDF | `needs_ocr` is a terminal *expected* state, never the DLQ | wait for the OCR tier |
+| A document the reaper gave up on | the same failure survived 5 rescues over an hour; `last_error` names it | fix the cause, then reset the row — see [The reaper](#the-reaper) |
 | A message that has used both redrives | the bound exists so a poison document cannot loop forever | inspect it by hand — **a DLQ alarm now emails you after 15 min** |
 | An IAM denial | every call fails identically; retrying cannot fix a policy | read the AccessDenied, widen one statement — see the deploy runbook |
 | The ALB and the API task billing | nothing turns them off but you | `make aws-park`, or destroy the compute layer |
@@ -86,6 +87,33 @@ Re-enqueueing a document that was fine is harmless — every handler opens with 
 status guard and returns early on a state it has already passed — which is
 exactly why the reaper can afford to be approximate.
 
+**It gives up, visibly, after 5 rescues.** A document that is *not* fine used
+to be re-enqueued on every sweep forever: the reaper wrote nothing to the row,
+so a document failing at a site no handler guarded — `put_object` of the parsed
+text on an S3 permission problem, say — stayed at `parsing` and came back every
+five minutes. Now each rescue is claimed by a conditional UPDATE that increments
+`documents.reap_count`, and past `MAX_REAP_ATTEMPTS` the document is marked
+`failed` with `last_error` reading `gave up after 5 recovery attempts at stage
+'parse'; last error: …`. Every rescue waits out the 15-minute threshold first,
+so that is over an hour of the same document failing — a storage or database
+blip gets recovered on the next rescue instead of killing anything. That is also
+why a handler never marks a document failed for an unexpected exception on its
+last delivery: three deliveries is thirty seconds.
+
+Three things are deliberately *not* counted:
+
+- **The API's sweep.** It exists to wake a fleet scaled to zero, and while
+  nothing consumes, every rescue looks like a failure. Only a worker's sweep
+  counts — a worker running it is proof the fleet is up.
+- **`budget_exceeded` documents.** Their rescue is a poll for budget; giving up
+  on them would destroy work the cap exists to pause.
+- **Deferred documents.** A deferral (provider circuit open, tenant at its
+  in-flight ceiling) refreshes `updated_at`, so a document whose message is
+  alive is never mistaken for a stranded one — otherwise an outage would spend
+  every in-flight document's rescues and duplicate each one per sweep.
+
+The claim also means several workers sweeping at once rescue a document once.
+
 It runs per tenant under RLS rather than through the owner connection. The
 worker holds no owner credentials by design, and a sweeper that needed them
 would be a reason to hand them out.
@@ -93,6 +121,21 @@ would be a reason to hand them out.
 ```bash
 aws logs filter-log-events --log-group-name /ecs/docfactory-dev/worker \
   --filter-pattern '"reaped a stranded document"'
+
+# documents the reaper gave up on, and why
+aws logs filter-log-events --log-group-name /ecs/docfactory-dev/worker \
+  --filter-pattern '"gave up on a document the reaper could not recover"'
+```
+
+To retry a given-up document once its cause is fixed, reset it with the owner
+connection and let the next sweep take it — `received` re-parses, `parsed`
+resumes at extract (only if `text_s3_key` is set):
+
+```sql
+UPDATE documents
+   SET status = 'received', reap_count = 0, last_error = NULL,
+       updated_at = now() - interval '1 hour'
+ WHERE id = '<document_id>';
 ```
 
 ## The DLQ redrive
@@ -178,6 +221,7 @@ All of it is configuration, never constants:
 |---|---|---|
 | `HEAL_INTERVAL_SECONDS` | 300 | how often a worker sweeps; 0 disables |
 | `HEAL_STALE_AFTER_SECONDS` | 900 | age before a document counts as stranded |
+| `MAX_REAP_ATTEMPTS` | 5 | rescues before the worker's sweep gives a document up as `failed` |
 | `DLQ_MAX_REDRIVES` | 2 | laps a dead-lettered message may take |
 | `BREAKER_THRESHOLD` | 5 | consecutive transient failures before opening |
 | `BREAKER_COOLDOWN_SECONDS` | 60 | how long the provider is left alone |

@@ -116,6 +116,11 @@ class Settings(BaseSettings):
     # This MUST stay above the longest visibility timeout (extract, 90s) or the
     # reaper races live messages and re-enqueues documents that were fine.
     heal_stale_after_seconds: int = 900
+    # Rescues the worker's healer makes before it gives a document up as FAILED.
+    # Each rescue waits out heal_stale_after_seconds first, so the default is
+    # over an hour of the same document failing every time it is retried --
+    # long enough that a storage or database blip is recovered, not buried.
+    max_reap_attempts: int = 5
     # Times a dead-lettered message may be brought back before it is left dead.
     # The bound is what stops a poison document looping between the two queues
     # forever, burning a model call per lap.
