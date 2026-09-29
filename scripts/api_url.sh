@@ -8,7 +8,7 @@
 # "No address" has four causes with four different fixes, so this names the
 # one it found instead of guessing:
 #
-#   no cluster          the stack is parked; terraform apply brings it back
+#   cluster not ACTIVE  the stack is parked; terraform apply brings it back
 #   desired count 0     scaled to zero by `make aws-park`; `make aws-unpark`
 #   no task / no IP     still starting. ECS places the task about 15s after
 #                       `terraform apply` returns, and it takes another ~30s to
@@ -16,6 +16,14 @@
 #                       about a stack that was up, and point at a fix
 #                       (`make aws-unpark`) that fails after a destroy-park.
 #   the lookup failed   the AWS error, verbatim
+#
+# THE CLUSTER'S STATUS DECIDES "PARKED", NOT A MISSING-CLUSTER ERROR. After
+# `terraform destroy` the cluster lingers as INACTIVE: list-tasks succeeds with
+# no tasks, and the service reads INACTIVE with a desired count of 0. Reading
+# that count at face value reported a destroy-park as a scale-to-zero, and sent
+# you to `make aws-unpark`. So the cluster must be ACTIVE before anything else
+# is asked, the same test the deploy workflow's gate uses, and a desired count
+# is only believed from an ACTIVE service.
 #
 # The region is printed with every failure because a CLI pointed at the wrong
 # region also finds no cluster, and that must not read as "parked".
@@ -33,11 +41,18 @@ fail() {
   exit 1
 }
 
+# ACTIVE, INACTIVE (destroyed, still listed for a while), or None (gone).
+status=$(aws ecs describe-clusters --clusters "$cluster" \
+  --query 'clusters[0].status' --output text 2>&1) ||
+  fail "Could not look up the $cluster cluster in $region: $status"
+if [ "$status" != "ACTIVE" ]; then
+  fail "No active $cluster cluster in $region (status: $status). If that is the right region," \
+    "the stack is parked: bring it back with (cd infra/terraform/compute-plane && terraform apply)"
+fi
+
 if ! task=$(aws ecs list-tasks --cluster "$cluster" --service-name "$service" \
   --desired-status RUNNING --query 'taskArns[0]' --output text 2>&1); then
   case "$task" in
-    *ClusterNotFound*) fail "No $cluster cluster in $region. If that is the right region," \
-      "the stack is parked: bring it back with (cd infra/terraform/compute-plane && terraform apply)" ;;
     *ServiceNotFound*) fail "No $service service in the $cluster cluster ($region)." \
       "Run terraform apply in infra/terraform/compute-plane." ;;
     *) fail "Could not look up the API task in $region: $task" ;;
@@ -45,16 +60,19 @@ if ! task=$(aws ecs list-tasks --cluster "$cluster" --service-name "$service" \
 fi
 
 if [ "$task" = "None" ] || [ -z "$task" ]; then
-  desired=$(aws ecs describe-services --cluster "$cluster" --services "$service" \
-    --query 'services[0].desiredCount' --output text 2>&1) ||
-    fail "Could not read the $service service in $region: $desired"
-  case "$desired" in
-    0) fail "The API is scaled to zero (make aws-park). make aws-unpark brings it back." ;;
-    None) fail "No $service service in the $cluster cluster ($region)." \
-      "Run terraform apply in infra/terraform/compute-plane." ;;
-    *) fail "The API task is still starting: ECS places it about 15s after terraform apply." \
-      "Try again in a minute." ;;
-  esac
+  service_state=$(aws ecs describe-services --cluster "$cluster" --services "$service" \
+    --query 'services[0].[status, desiredCount]' --output text 2>&1) ||
+    fail "Could not read the $service service in $region: $service_state"
+  read -r service_status desired <<<"$service_state"
+  if [ "$service_status" != "ACTIVE" ]; then
+    fail "No active $service service in the $cluster cluster ($region)." \
+      "Run terraform apply in infra/terraform/compute-plane."
+  fi
+  if [ "$desired" = "0" ]; then
+    fail "The API is scaled to zero (make aws-park). make aws-unpark brings it back."
+  fi
+  fail "The API task is still starting: ECS places it about 15s after terraform apply." \
+    "Try again in a minute."
 fi
 
 eni=$(aws ecs describe-tasks --cluster "$cluster" --tasks "$task" \
